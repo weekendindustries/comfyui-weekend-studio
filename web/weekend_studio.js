@@ -198,6 +198,11 @@ function mountPanel(root) {
   function connectionSection() {
     const st = status?.state;
     const out = [el("h3", {}, "Connection")];
+    // Same-computer mode needs no Connect: Weekend Studio in a browser here finds this ComfyUI.
+    if (status?.local?.port) {
+      out.push(el("p", { class: "wks-dim" }, el("span", { class: "wks-ok" }, "● "),
+        "On this computer, Weekend Studio finds this ComfyUI by itself. No account needed. Connect your account to use it from other devices too."));
+    }
     if (st === "connected") {
       out.push(el("p", {}, el("span", { class: "wks-ok" }, "● "), "Connected as ", el("b", {}, status.machineName || "this ComfyUI"), "."),
         el("p", { class: "wks-dim" }, "The workflows you show below appear in Weekend Studio's generator list on any device you're signed in on."),

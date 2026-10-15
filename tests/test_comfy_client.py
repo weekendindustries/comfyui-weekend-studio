@@ -40,3 +40,33 @@ class Refusals(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoryRace(unittest.IsolatedAsyncioTestCase):
+    async def test_outputs_waits_for_comfyui_to_file_the_run(self):
+        import weekend_studio.comfy_client as cc
+        c = ComfyClient("http://127.0.0.1:8188")
+        answers = [None, None, {"status": {"completed": False}, "outputs": {}},
+                   {"status": {"completed": True}, "outputs": {"20": {"images": [{"filename": "a.png"}]}}}]
+
+        async def history(_pid):
+            return answers.pop(0) if answers else None
+        c._history = history
+        step, cc.HISTORY_WAIT_STEP = cc.HISTORY_WAIT_STEP, 0
+        try:
+            self.assertEqual(await c.outputs("p1"), {"20": {"images": [{"filename": "a.png"}]}})
+        finally:
+            cc.HISTORY_WAIT_STEP = step
+
+    async def test_gives_up_quietly(self):
+        import weekend_studio.comfy_client as cc
+        c = ComfyClient("http://127.0.0.1:8188")
+
+        async def history(_pid):
+            return None
+        c._history = history
+        step, cc.HISTORY_WAIT_STEP = cc.HISTORY_WAIT_STEP, 0
+        try:
+            self.assertEqual(await c.outputs("p1"), {})
+        finally:
+            cc.HISTORY_WAIT_STEP = step

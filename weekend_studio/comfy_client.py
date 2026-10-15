@@ -16,6 +16,8 @@ import uuid
 OBJECT_INFO_TTL = 30.0       # seconds — /object_info is several MB on a big install
 HISTORY_POLL = 5.0           # a quiet socket for this long → ask /history directly
 RUN_LIMIT = 2 * 60 * 60      # a single run may take up to two hours
+HISTORY_WAIT_TRIES = 40       # × HISTORY_WAIT_STEP: up to 6 s for ComfyUI to file a finished run
+HISTORY_WAIT_STEP = 0.15
 
 
 def local_base_url() -> str:
@@ -153,8 +155,16 @@ class ComfyClient:
             return (await r.json()).get(prompt_id)
 
     async def outputs(self, prompt_id: str) -> dict:
-        entry = await self._history(prompt_id)
-        return (entry or {}).get("outputs") or {}
+        """The run's outputs. ComfyUI says "done" on its socket a moment BEFORE it writes the run into
+        its history (prompt_worker stores it after execute returns), so a read right after "done" can
+        find nothing — seen 2026-10-14 when a same-computer run was faster than the relay ever is.
+        Ask again for a few seconds until the entry is there."""
+        for _ in range(HISTORY_WAIT_TRIES):
+            entry = await self._history(prompt_id)
+            if entry and (entry.get("outputs") or (entry.get("status") or {}).get("completed")):
+                return entry.get("outputs") or {}
+            await asyncio.sleep(HISTORY_WAIT_STEP)
+        return {}
 
     async def view(self, image: dict) -> bytes:
         s = await self._http()

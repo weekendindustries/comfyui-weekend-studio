@@ -92,6 +92,7 @@ class FakeRunner:
         for key in job.get("images", []):
             await fetch_input(key)
         await emit({"type": "queued", "position": 0})
+        await emit({"type": "executing", "node": "3"})
         for i in range(10):
             await emit({"type": "progress", "value": i, "max": 10})
         if self.fail:
@@ -174,10 +175,12 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         await until(lambda: conn.of("done"))
         self.assertEqual(self.transport.gets, [("https://hub.test/blob/j1/in-0", "get-t")])
         self.assertEqual(self.transport.puts[0][:2], ("https://hub.test/blob/j1/out-0", "put-t"))
-        self.assertEqual(conn.of("done")[0], {"t": "done", "jobId": "j1", "outputs": [{"name": "out-0", "mime": "image/png"}]})
+        self.assertEqual(conn.of("done")[0], {"t": "done", "jobId": "j1", "outputs": [{"name": "out-0", "mime": "image/png", "size": len(b"\x89PNG-out")}]})
         progress = [m for m in conn.of("event") if m["ev"]["type"] == "progress"]
         self.assertLess(len(progress), 10, "progress is throttled")
         self.assertNotIn("done", [m["ev"]["type"] for m in conn.of("event")], "the relay announces done itself")
+        self.assertLessEqual(len(progress), 1, "over the relay, progress at most every 12 s (the fake clock moves 0.05 s a read)")
+        self.assertNotIn("executing", [m["ev"]["type"] for m in conn.of("event")], "no per-node chatter over the relay")
         self.assertEqual(conn.of("status")[-1], {"t": "status", "busy": False, "queue": 0})
 
     async def test_a_failed_run_says_why(self):

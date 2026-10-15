@@ -21,7 +21,11 @@ from .runner import RunError
 PING_EVERY = 25.0
 BACKOFF = (1, 2, 5, 10, 30, 60)
 REFUSED_WAIT = 300.0             # membership lapsed / account frozen: try again in five minutes
-PROGRESS_EVERY = 0.2             # at most five progress events a second per job
+# Over the relay, progress at most every 12 s and no per-node "executing" chatter (cost, 2026-10-14):
+# the hub is billed while awake, and it can hibernate only after 10 s of quiet — so a long run with
+# frequent updates kept it awake (and billed) start to finish. Same-computer runs are free and keep
+# their fine-grained progress (local_server.py).
+PROGRESS_EVERY = 12.0
 MAX_PARALLEL = 4                 # jobs handed to ComfyUI at once (it queues them itself)
 
 CLOSE_REMOVED = 4403
@@ -287,9 +291,11 @@ class Bridge:
         async def put_output(index, data, mime):
             name = f"out-{index}"
             await self.transport.put_bytes(self._url(f"{output.get('prefix', '')}{index}"), output.get("ticket"), data, mime)
-            outputs.append({"name": name, "mime": mime})
+            outputs.append({"name": name, "mime": mime, "size": len(data)})   # the relay trusts this: no existence check
 
         async def emit(ev):
+            if ev.get("type") == "executing":
+                return
             if ev.get("type") == "progress":
                 now = self.clock()
                 if now - last_progress[0] < PROGRESS_EVERY:

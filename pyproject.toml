@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-weekend-studio"
 description = "Use your own ComfyUI workflows as generators in Weekend Studio. Pick the settings to show; results land straight in your document."
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 # MIT, copyright Weekend Industries (owner, 2026-10-14). The text is in LICENSE.
 license = { file = "LICENSE" }

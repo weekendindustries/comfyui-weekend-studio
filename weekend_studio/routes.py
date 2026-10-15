@@ -27,10 +27,11 @@ from .bridge import ApiError, Bridge
 from .bridge_io import Api, Transport, service_config
 from .comfy_client import ComfyClient
 from .credentials import Credentials
+from .local_server import LocalServer
 from .runner import RunError, Runner
 from .store import StoreError, WorkflowStore
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 def store_root() -> str:
@@ -60,6 +61,12 @@ def install(server) -> None:
     # Starts with ComfyUI's own loop. Not connected yet = it waits quietly for Connect.
     if config["functionsUrl"] and config["apiKey"]:
         asyncio.run_coroutine_threadsafe(bridge.run_forever(), server.loop)
+    # Same-computer mode: Weekend Studio in a browser on this computer, no account (local_server.py).
+    creds = bridge.credentials
+    local = LocalServer(store=store, runner=runner, comfy=client, version=VERSION,
+                        machine_name=machine_name(), config=config,
+                        machine_id=lambda: (creds.load() or {}).get("machineId"))
+    asyncio.run_coroutine_threadsafe(local.start(), server.loop)
 
     def fail(status, code, message, details=None):
         return web.json_response({"error": code, "message": message, "details": details}, status=status)
@@ -70,7 +77,8 @@ def install(server) -> None:
 
     @routes.get("/weekend-studio/status")
     async def status(_request):
-        return web.json_response({"version": VERSION, "workflows": len(store.list()), **bridge.status()})
+        return web.json_response({"version": VERSION, "workflows": len(store.list()), **bridge.status(),
+                                  "local": {"port": local.port}})
 
     @routes.post("/weekend-studio/connect")
     async def connect(request):

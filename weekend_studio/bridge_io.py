@@ -23,6 +23,8 @@ def service_config() -> dict:
         "functionsUrl": os.environ.get("WEEKEND_STUDIO_FUNCTIONS_URL") or cfg.get("functionsUrl", ""),
         "apiKey": os.environ.get("WEEKEND_STUDIO_API_KEY") or cfg.get("apiKey", ""),
         "appUrl": os.environ.get("WEEKEND_STUDIO_APP_URL") or cfg.get("appUrl", ""),
+        # Sites allowed to use same-computer mode (local_server.py); defaults to Weekend Studio's own.
+        "localOrigins": cfg.get("localOrigins"),
     }
 
 
