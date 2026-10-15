@@ -1,0 +1,8 @@
+[
+  { "node": "4", "input": "ckpt_name", "label": "Model" },
+  { "node": "6", "input": "text", "label": "Describe the change", "role": "prompt" },
+  { "node": "3", "input": "steps", "max": 40 },
+  { "node": "10", "input": "strength_model", "label": "Detail", "group": "Look", "min": 0, "max": 2 },
+  { "node": "3", "input": "model" },
+  { "node": "99", "input": "text" }
+]

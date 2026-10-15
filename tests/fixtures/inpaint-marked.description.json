@@ -1,0 +1,75 @@
+{
+  "format": 1,
+  "id": "inpaint-marked",
+  "name": "Inpaint (marked)",
+  "version": "2f2d1afb245ba97f1bb3",
+  "inputs": [
+    {
+      "key": "6.text",
+      "node": "6",
+      "input": "text",
+      "label": "Describe the change",
+      "type": "text",
+      "multiline": true,
+      "default": "a red door",
+      "role": "prompt"
+    },
+    {
+      "key": "12.weekend_ref",
+      "node": "12",
+      "input": "weekend_ref",
+      "type": "image",
+      "role": "area",
+      "label": "Area"
+    },
+    {
+      "key": "13.weekend_ref",
+      "node": "13",
+      "input": "weekend_ref",
+      "type": "mask",
+      "role": "mask",
+      "label": "Selection"
+    },
+    {
+      "key": "4.ckpt_name",
+      "node": "4",
+      "input": "ckpt_name",
+      "label": "Model",
+      "type": "choice",
+      "options": [
+        "sd_xl_base_1.0.safetensors",
+        "flux1-dev-fp8.safetensors",
+        "juggernautXL_v9.safetensors"
+      ],
+      "default": "juggernautXL_v9.safetensors"
+    },
+    {
+      "key": "3.steps",
+      "node": "3",
+      "input": "steps",
+      "label": "Steps",
+      "type": "int",
+      "min": 1,
+      "max": 40,
+      "default": 28
+    },
+    {
+      "key": "10.strength_model",
+      "node": "10",
+      "input": "strength_model",
+      "label": "Detail",
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 0.8,
+      "group": "Look"
+    }
+  ],
+  "outputs": [
+    {
+      "node": "20",
+      "kind": "image"
+    }
+  ]
+}

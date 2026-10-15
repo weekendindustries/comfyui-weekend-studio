@@ -1,0 +1,107 @@
+{
+  "CheckpointLoaderSimple": {
+    "input": { "required": { "ckpt_name": [["sd_xl_base_1.0.safetensors", "flux1-dev-fp8.safetensors", "juggernautXL_v9.safetensors"], {}] } },
+    "output": ["MODEL", "CLIP", "VAE"], "output_name": ["MODEL", "CLIP", "VAE"],
+    "name": "CheckpointLoaderSimple", "display_name": "Load Checkpoint", "category": "loaders", "output_node": false
+  },
+  "LoraLoader": {
+    "input": { "required": {
+      "model": ["MODEL"], "clip": ["CLIP"],
+      "lora_name": ["COMBO", { "options": ["detail-tweaker.safetensors", "film-grain.safetensors"] }],
+      "strength_model": ["FLOAT", { "default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01 }],
+      "strength_clip": ["FLOAT", { "default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01 }]
+    } },
+    "output": ["MODEL", "CLIP"], "output_name": ["MODEL", "CLIP"],
+    "name": "LoraLoader", "display_name": "Load LoRA", "category": "loaders", "output_node": false
+  },
+  "CLIPTextEncode": {
+    "input": { "required": { "text": ["STRING", { "multiline": true, "dynamicPrompts": true }], "clip": ["CLIP"] } },
+    "output": ["CONDITIONING"], "output_name": ["CONDITIONING"],
+    "name": "CLIPTextEncode", "display_name": "CLIP Text Encode (Prompt)", "category": "conditioning", "output_node": false
+  },
+  "ConditioningCombine": {
+    "input": { "required": { "conditioning_1": ["CONDITIONING"], "conditioning_2": ["CONDITIONING"] } },
+    "output": ["CONDITIONING"], "output_name": ["CONDITIONING"],
+    "name": "ConditioningCombine", "display_name": "Conditioning (Combine)", "category": "conditioning", "output_node": false
+  },
+  "KSampler": {
+    "input": { "required": {
+      "model": ["MODEL"],
+      "seed": ["INT", { "default": 0, "min": 0, "max": 18446744073709551615, "control_after_generate": true }],
+      "steps": ["INT", { "default": 20, "min": 1, "max": 10000 }],
+      "cfg": ["FLOAT", { "default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01 }],
+      "sampler_name": [["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "uni_pc"], {}],
+      "scheduler": [["normal", "karras", "exponential", "sgm_uniform", "simple"], {}],
+      "positive": ["CONDITIONING"], "negative": ["CONDITIONING"], "latent_image": ["LATENT"],
+      "denoise": ["FLOAT", { "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01 }]
+    } },
+    "output": ["LATENT"], "output_name": ["LATENT"],
+    "name": "KSampler", "display_name": "KSampler", "category": "sampling", "output_node": false
+  },
+  "EmptyLatentImage": {
+    "input": { "required": {
+      "width": ["INT", { "default": 512, "min": 16, "max": 16384, "step": 8 }],
+      "height": ["INT", { "default": 512, "min": 16, "max": 16384, "step": 8 }],
+      "batch_size": ["INT", { "default": 1, "min": 1, "max": 4096 }]
+    } },
+    "output": ["LATENT"], "output_name": ["LATENT"],
+    "name": "EmptyLatentImage", "display_name": "Empty Latent Image", "category": "latent", "output_node": false
+  },
+  "VAEEncode": {
+    "input": { "required": { "pixels": ["IMAGE"], "vae": ["VAE"] } },
+    "output": ["LATENT"], "output_name": ["LATENT"],
+    "name": "VAEEncode", "display_name": "VAE Encode", "category": "latent", "output_node": false
+  },
+  "SetLatentNoiseMask": {
+    "input": { "required": { "samples": ["LATENT"], "mask": ["MASK"] } },
+    "output": ["LATENT"], "output_name": ["LATENT"],
+    "name": "SetLatentNoiseMask", "display_name": "Set Latent Noise Mask", "category": "latent/inpaint", "output_node": false
+  },
+  "VAEDecode": {
+    "input": { "required": { "samples": ["LATENT"], "vae": ["VAE"] } },
+    "output": ["IMAGE"], "output_name": ["IMAGE"],
+    "name": "VAEDecode", "display_name": "VAE Decode", "category": "latent", "output_node": false
+  },
+  "LoadImage": {
+    "input": { "required": { "image": [["example.png", "portrait.jpg"], { "image_upload": true }] } },
+    "output": ["IMAGE", "MASK"], "output_name": ["IMAGE", "MASK"],
+    "name": "LoadImage", "display_name": "Load Image", "category": "image", "output_node": false
+  },
+  "SaveImage": {
+    "input": { "required": { "images": ["IMAGE"], "filename_prefix": ["STRING", { "default": "ComfyUI" }] } },
+    "output": [], "output_name": [],
+    "name": "SaveImage", "display_name": "Save Image", "category": "image", "output_node": true
+  },
+  "PreviewImage": {
+    "input": { "required": { "images": ["IMAGE"] } },
+    "output": [], "output_name": [],
+    "name": "PreviewImage", "display_name": "Preview Image", "category": "image", "output_node": true
+  },
+  "WeekendImageIn": {
+    "input": {
+      "required": {
+        "source": [["area", "layer", "canvas"], { "default": "area" }],
+        "label": ["STRING", { "default": "Image", "multiline": false }]
+      },
+      "optional": {
+        "fallback": ["IMAGE"],
+        "weekend_ref": ["STRING", { "default": "", "multiline": false }]
+      }
+    },
+    "output": ["IMAGE", "MASK"], "output_name": ["IMAGE", "MASK"],
+    "name": "WeekendImageIn", "display_name": "Weekend Image In", "category": "Weekend Studio", "output_node": false
+  },
+  "WeekendMaskIn": {
+    "input": {
+      "required": { "label": ["STRING", { "default": "Mask", "multiline": false }] },
+      "optional": { "fallback": ["MASK"], "weekend_ref": ["STRING", { "default": "", "multiline": false }] }
+    },
+    "output": ["MASK"], "output_name": ["MASK"],
+    "name": "WeekendMaskIn", "display_name": "Weekend Mask In", "category": "Weekend Studio", "output_node": false
+  },
+  "WeekendOutput": {
+    "input": { "required": { "images": ["IMAGE"] }, "optional": { "mask": ["MASK"] } },
+    "output": [], "output_name": [],
+    "name": "WeekendOutput", "display_name": "Weekend Output", "category": "Weekend Studio", "output_node": true
+  }
+}

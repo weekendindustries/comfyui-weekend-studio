@@ -1,0 +1,29 @@
+[project]
+name = "comfyui-weekend-studio"
+description = "Use your own ComfyUI workflows as generators in Weekend Studio. Pick the settings to show; results land straight in your document."
+version = "0.1.0"
+requires-python = ">=3.10"
+# MIT, copyright Weekend Industries (owner, 2026-10-14). The text is in LICENSE.
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+# Nothing beyond ComfyUI itself (aiohttp, torch, numpy, Pillow all ship with it).
+dependencies = []
+
+[project.urls]
+# This folder (comfy-node/ in the Weekend Studio monorepo) is the whole public repo.
+Repository = "https://github.com/weekendindustries/comfyui-weekend-studio"
+"Bug Tracker" = "https://github.com/weekendindustries/comfyui-weekend-studio/issues"
+Documentation = "https://weekendindustries.app/#docs"
+
+[tool.comfy]
+# The Comfy Registry publisher (registry.comfy.org). Permanent once created: it's in the node's URL.
+PublisherId = "weekendindustries"
+DisplayName = "Weekend Studio"
+# A square PNG/SVG/JPG, at most 400 × 400, at a public URL (the site bucket's site/v1/ works).
+Icon = ""
+# web/ is the Weekend Studio tab; weekend_studio/service.json says where Weekend Studio is —
+# both must ship (service.json is generated: node tools/write-service-json.mjs).
+includes = ["web"]

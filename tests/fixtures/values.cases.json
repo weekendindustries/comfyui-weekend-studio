@@ -1,0 +1,60 @@
+{
+  "_about": "Shared by packages/comfy/description.test.mjs and comfy-node/tests/test_description.py. Both must agree on ok, every error {key, code} IN ORDER, and (when given) the normalized values. `description` is a fixture name (<name>.description.json) or an inline object.",
+  "inline": {
+    "small": {
+      "format": 1, "id": "small", "name": "Small", "version": "0123456789abcdef0123",
+      "inputs": [
+        { "key": "1.text", "node": "1", "input": "text", "label": "Short", "type": "text", "default": "hi", "maxLength": 5 },
+        { "key": "2.flag", "node": "2", "input": "flag", "label": "Flag", "type": "bool", "default": false },
+        { "key": "3.batch", "node": "3", "input": "batch", "label": "Batch", "type": "choice", "options": [1, 2, 4], "default": 1 },
+        { "key": "4.ref", "node": "4", "input": "image", "label": "Reference", "type": "image", "role": "reference", "optional": true }
+      ],
+      "outputs": [{ "node": "9", "kind": "image" }]
+    }
+  },
+  "cases": [
+    { "name": "defaults only", "description": "txt2img", "values": {}, "ok": true, "errors": [],
+      "normalized": { "6.text": "a lighthouse on a cliff at dusk", "7.text": "blurry, watermark", "5.width": 1024, "5.height": 1024,
+        "3.seed": 156680208700286, "3.steps": 20, "3.cfg": 8, "3.sampler_name": "euler", "3.scheduler": "normal", "3.denoise": 1 } },
+    { "name": "overrides", "description": "txt2img", "values": { "6.text": "a fox", "3.steps": 30, "3.cfg": 4.5, "3.sampler_name": "uni_pc" }, "ok": true, "errors": [] },
+    { "name": "a float holding an integer is an integer", "description": "txt2img", "values": { "3.steps": 30.0 }, "ok": true, "errors": [] },
+    { "name": "string for a number", "description": "txt2img", "values": { "3.steps": "30" }, "ok": false, "errors": [{ "key": "3.steps", "code": "type" }] },
+    { "name": "fractional int", "description": "txt2img", "values": { "3.steps": 30.5 }, "ok": false, "errors": [{ "key": "3.steps", "code": "type" }] },
+    { "name": "below min", "description": "txt2img", "values": { "3.steps": 0 }, "ok": false, "errors": [{ "key": "3.steps", "code": "range" }] },
+    { "name": "above max", "description": "txt2img", "values": { "3.cfg": 101 }, "ok": false, "errors": [{ "key": "3.cfg", "code": "range" }] },
+    { "name": "seed past 2^53 is not a safe integer", "description": "txt2img", "values": { "3.seed": 9007199254740992 }, "ok": false, "errors": [{ "key": "3.seed", "code": "type" }] },
+    { "name": "not an option", "description": "txt2img", "values": { "3.sampler_name": "nope" }, "ok": false, "errors": [{ "key": "3.sampler_name", "code": "choice" }] },
+    { "name": "unknown key", "description": "txt2img", "values": { "99.text": "x" }, "ok": false, "errors": [{ "key": "99.text", "code": "unknown" }] },
+    { "name": "number for text", "description": "txt2img", "values": { "6.text": 5 }, "ok": false, "errors": [{ "key": "6.text", "code": "type" }] },
+    { "name": "null is not a value", "description": "txt2img", "values": { "3.steps": null }, "ok": false, "errors": [{ "key": "3.steps", "code": "type" }] },
+    { "name": "images missing", "description": "inpaint", "values": {}, "ok": false,
+      "errors": [{ "key": "12.weekend_ref", "code": "image-missing" }, { "key": "13.weekend_ref", "code": "image-missing" }] },
+    { "name": "images supplied", "description": "inpaint", "values": {}, "images": ["12.weekend_ref", "13.weekend_ref"], "ok": true, "errors": [] },
+    { "name": "pixels never ride in values", "description": "inpaint", "values": { "12.weekend_ref": "input/x.png" }, "images": ["13.weekend_ref"], "ok": false,
+      "errors": [{ "key": "12.weekend_ref", "code": "type" }, { "key": "12.weekend_ref", "code": "image-missing" }] },
+    { "name": "image key that isn't an image", "description": "inpaint", "values": {}, "images": ["12.weekend_ref", "13.weekend_ref", "6.text"], "ok": false,
+      "errors": [{ "key": "6.text", "code": "unknown" }] },
+    { "name": "marked range is the gate", "description": "inpaint-marked", "values": { "3.steps": 41 }, "images": ["12.weekend_ref", "13.weekend_ref"], "ok": false,
+      "errors": [{ "key": "3.steps", "code": "range" }] },
+    { "name": "text too long", "description": "small", "values": { "1.text": "toolong" }, "ok": false, "errors": [{ "key": "1.text", "code": "too-long" }] },
+    { "name": "bool must be a bool", "description": "small", "values": { "2.flag": 1 }, "ok": false, "errors": [{ "key": "2.flag", "code": "type" }] },
+    { "name": "numeric choice", "description": "small", "values": { "2.flag": true, "3.batch": 4 }, "ok": true, "errors": [],
+      "normalized": { "1.text": "hi", "2.flag": true, "3.batch": 4 } },
+    { "name": "numeric choice is not a string", "description": "small", "values": { "3.batch": "4" }, "ok": false, "errors": [{ "key": "3.batch", "code": "choice" }] },
+    { "name": "true is not 1", "description": "small", "values": { "3.batch": true }, "ok": false, "errors": [{ "key": "3.batch", "code": "choice" }] },
+    { "name": "optional image may be absent", "description": "small", "values": {}, "ok": true, "errors": [] }
+  ],
+  "badDescriptions": [
+    { "name": "wrong format", "patch": { "format": 2 }, "error": "format" },
+    { "name": "bad id", "patch": { "id": "Has Spaces" }, "error": "id" },
+    { "name": "bad version", "patch": { "version": "xyz" }, "error": "version" },
+    { "name": "duplicate key", "patchInputs": [{ "key": "1.text", "node": "1", "input": "text", "label": "Again", "type": "text", "default": "" }], "error": "duplicate" },
+    { "name": "choice default not an option", "patchInputs": [{ "key": "5.c", "node": "5", "input": "c", "label": "C", "type": "choice", "options": ["a"], "default": "b" }], "error": "not an option" },
+    { "name": "inverted range", "patchInputs": [{ "key": "5.n", "node": "5", "input": "n", "label": "N", "type": "int", "min": 10, "max": 1, "default": 5 }], "error": "bad range" },
+    { "name": "default outside range", "patchInputs": [{ "key": "5.n", "node": "5", "input": "n", "label": "N", "type": "float", "min": 0, "max": 1, "default": 2 }], "error": "outside range" },
+    { "name": "empty label", "patchInputs": [{ "key": "5.t", "node": "5", "input": "t", "label": "  ", "type": "text", "default": "" }], "error": "label" },
+    { "name": "unknown role", "patchInputs": [{ "key": "5.t", "node": "5", "input": "t", "label": "T", "type": "text", "default": "", "role": "boss" }], "error": "unknown role" },
+    { "name": "unknown type", "patchInputs": [{ "key": "5.t", "node": "5", "input": "t", "label": "T", "type": "video" }], "error": "unknown type" },
+    { "name": "video output", "patch": { "outputs": [{ "node": "9", "kind": "video" }] }, "error": "outputs[0]" }
+  ]
+}

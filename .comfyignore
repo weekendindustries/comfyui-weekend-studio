@@ -1,0 +1,8 @@
+# Left out of the Registry archive: development only.
+tests/
+tools/
+__pycache__/
+*.pyc
+.machine.json
+.github/
+.gitignore
