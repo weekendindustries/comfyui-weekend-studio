@@ -4,6 +4,10 @@ No account, no relay, no pairing — the signed-out path (reviews/comfyui-plan-2
 ComfyUI's own server refuses cross-origin requests unless it's started with a flag, so the pack runs
 a small server of its own on 127.0.0.1 (default port 8189) that answers Weekend Studio's sites only.
 
+OFF until the user turns it on (0.3.0, security review B6): "Use from a browser on this computer" in
+the Weekend Studio tab. Importing the pack starts no server; the switch is kept in the pack's own
+folder (home.py settings.json), and turning it off stops the server at once.
+
   GET  /v1/hello    → { app, version, machineName, machineId, workflows: [descriptions] }
                     machineId: this ComfyUI's id on the person's account when it's connected (else
                     null), so a signed-in browser can tell "the machine on my account" is right here
@@ -14,8 +18,8 @@ a small server of its own on 127.0.0.1 (default port 8189) that answers Weekend 
   POST /v1/cancel   { jobId }
 
 Who may call it — every request, not just the browser's preflight:
-  · Origin must be one of Weekend Studio's sites (service.json `localOrigins`, plus
-    WEEKEND_STUDIO_LOCAL_ORIGINS for development). A page elsewhere can't even make it run a job:
+  · Origin must be one of Weekend Studio's sites (service.json `localOrigins`; a development copy
+    lists its own there). A page elsewhere can't even make it run a job:
     a POST without our Origin is refused before anything is read, and JSON bodies need a preflight.
   · Host must be 127.0.0.1/localhost at our port — a site that points its own name at 127.0.0.1
     (DNS rebinding) is refused.
@@ -29,24 +33,24 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 import re
+
+from .privacy import scrub, scrub_all
 
 DEFAULT_PORT = 8189
 PORT_TRIES = 5                       # 8189…8193 if something else holds the first
 MAX_BODY = 160 * 1024 * 1024         # eight 40 MB pictures as base64, with room to spare
-DEFAULT_ORIGINS = ("https://weekendindustries.app", "https://studio.weekendindustries.dev")
+# The site moved to weekendstudio.app (2026-11-02); the old address redirects there, so it never sends a run itself,
+# but a page still open on it keeps working until it reloads.
+DEFAULT_ORIGINS = ("https://weekendstudio.app", "https://weekendindustries.app", "https://studio.weekendindustries.dev")
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 # ── Who may call (pure; tests/test_local_server.py) ──────────────────────────────────────────
 
-def allowed_origins(config: dict | None = None, env: dict | None = None) -> set:
-    env = os.environ if env is None else env
-    origins = set((config or {}).get("localOrigins") or DEFAULT_ORIGINS)
-    extra = env.get("WEEKEND_STUDIO_LOCAL_ORIGINS", "")
-    origins.update(o.strip().rstrip("/") for o in extra.split(",") if o.strip())
-    return {o.rstrip("/") for o in origins}
+def allowed_origins(config: dict | None = None) -> set:
+    origins = (config or {}).get("localOrigins") or DEFAULT_ORIGINS
+    return {o.strip().rstrip("/") for o in origins if isinstance(o, str) and o.strip()}
 
 
 def origin_ok(origin: str | None, origins: set) -> bool:
@@ -134,7 +138,9 @@ class LocalServer:
     async def start(self, port: int | None = None) -> int | None:
         """Bind 127.0.0.1 on the first free port from `port`; returns the port (None if none)."""
         from aiohttp import web
-        first = port or int(os.environ.get("WEEKEND_STUDIO_LOCAL_PORT") or DEFAULT_PORT)
+        if self._runner is not None and self.port:
+            return self.port   # already listening
+        first = port or DEFAULT_PORT
         self._runner = web.AppRunner(self.app(), access_log=None)
         await self._runner.setup()
         for p in range(first, first + PORT_TRIES):
@@ -146,11 +152,14 @@ class LocalServer:
             except OSError:
                 continue
         await self._runner.cleanup()
+        self._runner = None
         return None
 
     async def stop(self):
         if self._runner:
             await self._runner.cleanup()
+            self._runner = None
+        self.port = None
 
     def _guard_ok(self, request) -> tuple[bool, str | None]:
         port = self.port or request.url.port
@@ -169,8 +178,9 @@ class LocalServer:
         from aiohttp import web
         object_info = await self.comfy.object_info(fresh=True)
         workflows = [self.store.describe(r, object_info) for r in self.store.list()]
+        name = self.machine_name() if callable(self.machine_name) else self.machine_name
         return web.json_response({"app": "weekend-studio", "version": self.version,
-                                  "machineName": self.machine_name, "machineId": self.machine_id(), "workflows": workflows})
+                                  "machineName": name, "machineId": self.machine_id(), "workflows": workflows})
 
     async def _cancel(self, request):
         from aiohttp import web
@@ -215,10 +225,11 @@ class LocalServer:
             await self.runner.run(job, fetch_input=fetch_input, put_output=put_output, emit=emit)
             await line({"type": "done", "outputs": outputs})
         except RunError as e:
-            await line({"type": "failed", "code": e.code, "message": str(e), "details": e.details})
+            # A web page reads this (it could pass it on): no home-folder paths in it (B5).
+            await line({"type": "failed", "code": e.code, "message": scrub(str(e)), "details": scrub_all(e.details)})
         except Exception as e:   # ComfyUI hiccup, a closed tab
             try:
-                await line({"type": "failed", "code": "comfy", "message": str(e)[:300] or "the run failed"})
+                await line({"type": "failed", "code": "comfy", "message": scrub(str(e)[:300]) or "the run failed"})
             except Exception:
                 pass
         await resp.write_eof()

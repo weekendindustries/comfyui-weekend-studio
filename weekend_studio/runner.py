@@ -12,9 +12,11 @@ a job plus three callables — fetch an input's bytes, put an output's bytes, em
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import struct
 
 from .description import validate_values
 from .graph import GraphError, fill_graph
@@ -45,6 +47,83 @@ def sniff_image(data: bytes):
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
     return None
+
+
+def strip_metadata(data: bytes) -> bytes:
+    """The picture without its text metadata (0.2.2). Save Image and Preview Image write the whole
+    workflow into the PNG (a "prompt" and a "workflow" text chunk); some savers put it in WebP/JPEG
+    EXIF. These bytes leave the computer, and the workflow is the person's own — so it's cut out,
+    by rewriting the file's chunks: the pixels aren't decoded or re-encoded, nothing is lost.
+    Bytes that don't parse are returned as they are (a browser couldn't show them either)."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return _strip_png(data)
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return _strip_webp(data)
+        if data[:3] == b"\xff\xd8\xff":
+            return _strip_jpeg(data)
+    except (IndexError, ValueError, struct.error):
+        pass
+    return data
+
+
+PNG_TEXT = {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}
+
+
+def _strip_png(data: bytes) -> bytes:
+    out, i = [data[:8]], 8
+    while i < len(data):
+        (length,) = struct.unpack(">I", data[i:i + 4])
+        kind = data[i + 4:i + 8]
+        end = i + 12 + length
+        if end > len(data):
+            raise ValueError("truncated PNG")
+        if kind not in PNG_TEXT:
+            out.append(data[i:end])
+        i = end
+        if kind == b"IEND":
+            break
+    return b"".join(out)
+
+
+def _strip_webp(data: bytes) -> bytes:
+    out, i = [], 12
+    while i + 8 <= len(data):
+        kind = data[i:i + 4]
+        (size,) = struct.unpack("<I", data[i + 4:i + 8])
+        if i + 8 + size > len(data):
+            raise ValueError("truncated WebP")
+        end = i + 8 + size + (size & 1)        # chunks are padded to an even length
+        chunk = data[i:end]
+        if kind == b"VP8X":
+            chunk = chunk[:8] + bytes([chunk[8] & ~0x0C]) + chunk[9:]   # no EXIF (0x08) or XMP (0x04) any more
+        if kind not in (b"EXIF", b"XMP "):
+            out.append(chunk)
+        i = end
+    body = b"".join(out)
+    return b"RIFF" + struct.pack("<I", len(body) + 4) + b"WEBP" + body
+
+
+def _strip_jpeg(data: bytes) -> bytes:
+    out, i = [data[:2]], 2
+    while i < len(data):
+        if data[i] != 0xFF:
+            raise ValueError("not a JPEG marker")
+        marker = data[i + 1]
+        if marker == 0xDA:              # start of scan: the rest is pixels
+            out.append(data[i:])
+            break
+        if 0xD0 <= marker <= 0xD9 or marker == 0x01:
+            out.append(data[i:i + 2])
+            i += 2
+            continue
+        (length,) = struct.unpack(">H", data[i + 2:i + 4])
+        seg = data[i:i + 2 + length]
+        # APP1 = EXIF/XMP, COM = comment; APP0 (JFIF), APP2 (ICC color) and APP14 (Adobe) stay.
+        if marker not in (0xE1, 0xFE):
+            out.append(seg)
+        i += 2 + length
+    return b"".join(out)
 
 
 def mime_for(filename: str) -> str:
@@ -129,32 +208,44 @@ class Runner:
 
         # 4. Fill and queue.
         try:
-            graph = fill_graph(rec["graph"], desc, checked["values"], refs)
+            graph = fill_graph(rec["graph"], desc, checked["values"], refs, object_info)
         except GraphError as e:
             raise RunError("stale", f"the saved workflow doesn't match its settings ({e})") from e
 
         prompt_id = None
         finished = False
-        async for ev in self.client.run(graph):
-            t = ev.get("type")
-            if t == "queued":
-                prompt_id = ev["prompt_id"]
-                self._prompts[job_id] = prompt_id
-                if job_id in self._canceled:
-                    await self.client.cancel(prompt_id)
-                await emit({"type": "queued", "position": ev.get("position")})
-            elif t == "progress":
-                await emit({"type": "progress", "value": ev.get("value"), "max": ev.get("max"), "node": ev.get("node")})
-            elif t == "executing":
-                await emit({"type": "executing", "node": ev.get("node")})
-            elif t == "error":
-                raise RunError("comfy", ev.get("message") or "ComfyUI stopped with an error",
-                               {"node": ev.get("node"), "nodeType": ev.get("node_type")})
-            elif t == "interrupted":
-                raise RunError("canceled", "canceled")
-            elif t == "done":
-                finished = True
-                break
+        ended = False     # ComfyUI itself said the prompt is over (done, error or interrupted)
+        try:
+            # aclosing: leaving early closes the run's ComfyUI socket now, not whenever it's collected.
+            async with contextlib.aclosing(self.client.run(graph)) as events:
+                async for ev in events:
+                    t = ev.get("type")
+                    if t == "queued":
+                        prompt_id = ev["prompt_id"]
+                        self._prompts[job_id] = prompt_id
+                        if job_id in self._canceled:
+                            await self.client.cancel(prompt_id)
+                        await emit({"type": "queued", "position": ev.get("position")})
+                    elif t == "progress":
+                        await emit({"type": "progress", "value": ev.get("value"), "max": ev.get("max"), "node": ev.get("node")})
+                    elif t == "executing":
+                        await emit({"type": "executing", "node": ev.get("node")})
+                    elif t == "error":
+                        ended = True
+                        raise RunError("comfy", ev.get("message") or "ComfyUI stopped with an error",
+                                       {"node": ev.get("node"), "nodeType": ev.get("node_type")})
+                    elif t == "interrupted":
+                        ended = True
+                        raise RunError("canceled", "canceled")
+                    elif t == "done":
+                        finished = ended = True
+                        break
+        finally:
+            # Abandoned while queued or running — the browser tab closed (its next progress write
+            # failed), the relay dropped, a task cancel: take the prompt out of ComfyUI too. Otherwise
+            # it runs later on inputs this run's cleanup has already deleted, and fails at LoadImage.
+            if prompt_id is not None and not ended:
+                await self.client.cancel(prompt_id)
         if not finished or prompt_id is None:
             raise RunError("comfy", "lost touch with ComfyUI before the run finished")
 
@@ -166,7 +257,7 @@ class Runner:
                 data = await self.client.view(image)
                 if not data or len(data) > MAX_OUTPUT_BYTES:
                     continue
-                await put_output(count, data, mime_for(image.get("filename", "")))
+                await put_output(count, strip_metadata(data), mime_for(image.get("filename", "")))
                 count += 1
         if not count:
             raise RunError("no-output", "the workflow finished without an image")

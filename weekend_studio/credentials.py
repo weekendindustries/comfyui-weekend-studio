@@ -1,5 +1,9 @@
-"""This machine's identity: the machine token comfy-pair issued, kept in ComfyUI's user folder,
-readable by this user only. It's the one secret the node holds; Disconnect deletes it."""
+"""This machine's identity: the machine token comfy-pair issued, readable by this user only. It's the
+one secret the node holds; Disconnect deletes it.
+
+Kept in the pack's own folder (home.py), never under ComfyUI's user/ folder: ComfyUI serves that
+over HTTP (/api/userdata), so a token there could be read, or swapped for someone else's, by
+anything that reached ComfyUI's port (0.3.0, security review B1)."""
 from __future__ import annotations
 
 import json
@@ -24,6 +28,10 @@ class Credentials:
     def save(self, data: dict) -> None:
         folder = os.path.dirname(self.path)
         os.makedirs(folder, exist_ok=True)
+        try:
+            os.chmod(folder, 0o700)
+        except OSError:
+            pass
         fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-", suffix=".json")
         try:
             os.chmod(tmp, 0o600)

@@ -102,6 +102,8 @@ class FakeRunner:
         return {"outputs": 1}
 
     async def cancel(self, job_id):
+        if job_id == "boom":
+            raise RuntimeError("boom")
         self.canceled.append(job_id)
         return True
 
@@ -123,7 +125,7 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = WorkflowStore(os.path.join(self.tmp.name, "store"))
-        self.store.publish("Portrait", fx("txt2img.api.json"))
+        self.wf = self.store.publish("Portrait", fx("txt2img.api.json"))["id"]
         self.creds = Credentials(os.path.join(self.tmp.name, "store", ".machine.json"))
         self.api, self.transport, self.runner = FakeApi(), FakeTransport(), FakeRunner()
         self.bridge = self.make()
@@ -164,12 +166,12 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.creds.load()["machineToken"], TOKEN, "the token is kept")
         self.assertEqual(self.transport.url, "wss://hub.test/hub")
         hello = self.transport.conns[0].of("hello")[0]
-        self.assertEqual([w["id"] for w in hello["workflows"]], ["portrait"])
+        self.assertEqual([w["id"] for w in hello["workflows"]], [self.wf])
         self.assertEqual(self.bridge.status()["state"], "connected")
 
     async def test_a_relayed_job(self):
         conn = await self.connected()
-        conn.push({"t": "run", "job": {"jobId": "j1", "workflowId": "portrait", "version": "v", "values": {}, "images": ["12.weekend_ref"]},
+        conn.push({"t": "run", "job": {"jobId": "j1", "workflowId": self.wf, "version": "v", "values": {}, "images": ["12.weekend_ref"]},
                    "inputs": {"12.weekend_ref": {"path": "/blob/j1/in-0", "ticket": "get-t"}},
                    "output": {"prefix": "/blob/j1/out-", "ticket": "put-t"}})
         await until(lambda: conn.of("done"))
@@ -247,6 +249,120 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.creds.save({"machineToken": TOKEN})
         self.assertEqual(os.stat(self.creds.path).st_mode & 0o777, 0o600)
 
+    # ── 0.2.2: nothing stops the connection for good ──────────────────────────────────────────
+    async def test_an_odd_relay_message_is_skipped(self):
+        conn = await self.connected()
+        conn.push({"t": "run", "job": "x"})                       # used to raise AttributeError
+        conn.push({"t": "run", "job": {"jobId": "j5"}, "inputs": "nope", "output": {}})
+        conn.push({"t": "cancel", "jobId": "boom"})               # the runner raises on this one
+        conn.push({"t": "cancel", "jobId": "j7"})
+        with self.assertLogs("weekend_studio", "ERROR"):
+            await until(lambda: self.runner.canceled)
+        self.assertEqual(self.runner.canceled, ["j7"], "the session still reads messages")
+        self.assertEqual(self.bridge.status()["state"], "connected")
+        self.assertEqual(conn.of("failed"), [], "nothing ran for the malformed ones")
+
+    async def test_comfyui_not_answering_at_hello_is_retried(self):
+        calls = {"n": 0}
+
+        class SlowStart(FakeComfy):
+            async def object_info(self, fresh=False):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ConnectionRefusedError("ComfyUI isn't listening yet")
+                return OBJECT_INFO
+        self.bridge.comfy = SlowStart()
+        with self.assertLogs("weekend_studio", "ERROR") as logged:
+            conn = await self.connected()
+        self.assertIn("the connection failed", logged.output[0], "it says so in ComfyUI's log")
+        self.assertEqual(len(self.transport.conns), 2, "the first socket was closed and a second one said hello")
+        self.assertEqual(self.transport.conns[0].closed, 1011)
+        self.assertEqual(conn.of("hello")[0]["workflows"][0]["id"], self.wf)
+
+    async def test_quick_closes_climb_the_backoff(self):
+        naps = []
+        nap = self.bridge._nap
+
+        async def record(seconds):
+            naps.append(seconds)
+            await nap(seconds)
+        self.bridge._nap = record
+        await self.connected()
+        for _ in range(3):
+            n = len(self.transport.conns)
+            await self.transport.conns[-1].close(1006)
+            await until(lambda: len(self.transport.conns) == n + 1 and self.transport.conns[-1].of("hello"))
+        self.assertEqual(naps[:3], [1, 2, 5], "a session that didn't last doesn't start the backoff over")
+
+    async def test_a_refused_message_waits_minutes(self):
+        naps = []
+        nap = self.bridge._nap
+
+        async def record(seconds):
+            naps.append(seconds)
+            await nap(seconds)
+        conn = await self.connected()
+        self.bridge._nap = record
+        await conn.close(1008)
+        await until(lambda: naps)
+        self.assertEqual(naps[0], 300)
+        self.assertIn("refused", self.bridge.status()["detail"])
+
+    def test_the_workflow_list_is_trimmed_to_fit(self):
+        import weekend_studio.bridge as b
+        limit, b.HELLO_LIMIT = b.HELLO_LIMIT, 5000
+        try:
+            small = [{"id": f"w{i}", "pad": "x" * 100} for i in range(5)]
+            big = {"id": "loras", "pad": "x" * 6000}
+            kept = self.bridge._fit(small[:2] + [big] + small[2:])
+            self.assertEqual([w["id"] for w in kept], [w["id"] for w in small], "the oversized one is left out, order kept")
+            self.assertIn("1 shown workflow is too large", self.bridge.detail)
+            self.assertEqual(self.bridge._fit(small), small)
+        finally:
+            b.HELLO_LIMIT = limit
+
+    async def test_an_unusable_approval_keeps_polling(self):
+        self.api.redeems = [{"status": "approved", "machineToken": None}, {"status": "approved", "machineToken": TOKEN, "machineId": "m1"}]
+        self.start()
+        await self.bridge.pair()
+        await until(lambda: self.creds.load() is not None)
+        self.assertEqual(self.creds.load()["name"], "Studio PC", "a missing name falls back to the machine's")
+
+    # ── 0.3.0: which account, and what leaves the computer ────────────────────────────────────
+    async def test_the_tab_can_say_which_account(self):
+        self.api.redeems = [{"status": "approved", "machineToken": TOKEN, "machineId": "m1", "name": "Studio PC", "handle": "@sam"}]
+        self.start()
+        await self.bridge.pair("  My   PC  ")
+        self.assertEqual(self.api.started, "My   PC")
+        await until(lambda: self.creds.load() is not None)
+        self.assertEqual(self.bridge.status()["account"], {"handle": "sam"})
+
+    async def test_comfy_token_renames_and_names_the_account(self):
+        tokens = self.api.machine_token
+
+        async def named(t):
+            return {**(await tokens(t)), "name": "Renamed PC", "handle": "sam"}
+        self.api.machine_token = named
+        await self.connected()
+        self.assertEqual((self.creds.load()["name"], self.creds.load()["handle"]), ("Renamed PC", "sam"))
+        self.assertEqual(self.bridge.status()["machineName"], "Renamed PC")
+
+    async def test_a_bad_handle_is_dropped(self):
+        self.api.redeems = [{"status": "approved", "machineToken": TOKEN, "machineId": "m1", "handle": "<script>"}]
+        self.start()
+        await self.bridge.pair()
+        await until(lambda: self.creds.load() is not None)
+        self.assertEqual(self.bridge.status()["account"], {"handle": None})
+
+    async def test_errors_leave_without_home_paths(self):
+        self.runner.fail = RunError("comfy", "No such file: /Users/firstname/ComfyUI/models/x.safetensors",
+                                    {"node": "4", "path": "/home/firstname/x"})
+        conn = await self.connected()
+        conn.push({"t": "run", "job": {"jobId": "j8"}, "inputs": {}, "output": {"prefix": "/blob/j8/out-", "ticket": "t"}})
+        await until(lambda: conn.of("failed"))
+        failed = conn.of("failed")[0]
+        self.assertEqual(failed["message"], "No such file: ~/ComfyUI/models/x.safetensors")
+        self.assertEqual(failed["details"], {"node": "4", "path": "~/x"})
 
 if __name__ == "__main__":
     unittest.main()

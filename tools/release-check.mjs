@@ -1,6 +1,6 @@
 // node comfy-node/tools/release-check.mjs — run before `comfy node publish`. Says what's missing.
 //   · pyproject.toml: no OWNER-TO-CHOOSE left (repository, publisher id), an icon URL
-//   · weekend_studio/service.json: production (weekendindustries.app) with a publishable key
+//   · weekend_studio/service.json: production (weekendstudio.app) with a publishable key
 //   · the version in pyproject.toml = routes.py VERSION (the tab shows it; the relay is told it)
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -17,9 +17,23 @@ if (version !== routesVersion) problems.push(`version mismatch: pyproject ${vers
 if (!existsSync(here('weekend_studio/service.json'))) problems.push('weekend_studio/service.json is missing: node comfy-node/tools/write-service-json.mjs');
 else {
   const s = JSON.parse(readFileSync(here('weekend_studio/service.json'), 'utf8'));
-  if (s.appUrl !== 'https://weekendindustries.app') problems.push(`service.json points at ${s.appUrl}, not production (rerun write-service-json.mjs without --staging)`);
-  if (!/^sb_publishable_/.test(s.apiKey || '')) problems.push('service.json has no publishable key');
+  if (s.appUrl !== 'https://weekendstudio.app') problems.push(`service.json points at ${s.appUrl}, not production (rerun write-service-json.mjs without --staging)`);
+  if (!/^sb_publishable_/.test(s.publicAnonKey || '')) problems.push('service.json has no publicAnonKey (sb_publishable_…): rerun write-service-json.mjs');
+  if ('apiKey' in s) problems.push('service.json still says apiKey: rerun write-service-json.mjs (0.3.0 calls it publicAnonKey)');
   if (!/^https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1$/.test(s.functionsUrl || '')) problems.push(`service.json functionsUrl looks wrong: ${s.functionsUrl}`);
+}
+// No environment variables in what ships (0.3.2). The Comfy Registry flagged 0.2.0 under
+// "policy-v0.6: credential-exfiltration": its scan read WEEKEND_STUDIO_API_KEY next to the relay
+// connection as a stolen credential. The only reads left are the OS's own folder names, in
+// home.config_base (where per-user settings belong).
+{
+  const { readdirSync } = await import('node:fs');
+  for (const f of readdirSync(here('weekend_studio')).filter((n) => n.endsWith('.py'))) {
+    const src = readFileSync(here(`weekend_studio/${f}`), 'utf8');
+    if (/WEEKEND_STUDIO_[A-Z_]+/.test(src.replace(/^\s*#.*$/gm, '').replace(/"""[\s\S]*?"""/g, ''))) problems.push(`weekend_studio/${f} reads a WEEKEND_STUDIO_* environment variable`);
+    const reads = (src.match(/os\.environ|os\.getenv|getenv\(/g) || []).length;
+    if (reads > (f === 'home.py' ? 1 : 0)) problems.push(`weekend_studio/${f} reads the environment (only home.config_base may, for the OS's folders)`);
+  }
 }
 // The node pack's copy of the shared test cases must match the source (tools/sync-fixtures.mjs).
 {

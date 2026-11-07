@@ -1,8 +1,11 @@
+import asyncio
 import os
+import struct
 import tempfile
 import unittest
+import zlib
 
-from weekend_studio.runner import RunError, Runner
+from weekend_studio.runner import RunError, Runner, strip_metadata
 from weekend_studio.store import WorkflowStore
 from tests.helpers import fx
 
@@ -55,7 +58,7 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def job(self, **kw):
-        j = {"jobId": "job1", "workflowId": "inpaint", "version": self.version,
+        j = {"jobId": "job1", "workflowId": self.rec["id"], "version": self.version,
              "values": {"6.text": "a blue door"}, "images": ["12.weekend_ref", "13.weekend_ref"]}
         j.update(kw)
         return j
@@ -123,9 +126,9 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
         await self.assertRefused("invalid", job=self.job(jobId="../../etc"))
 
     async def test_missing_nodes(self):
-        self.store.publish("Up", fx("missing-node.api.json"))
-        await self.assertRefused("missing-nodes", job=self.job(workflowId="up", images=[], values={},
-                                 version=self.store.describe(self.store.get("up"), OBJECT_INFO)["version"]))
+        up = self.store.publish("Up", fx("missing-node.api.json"))
+        await self.assertRefused("missing-nodes", job=self.job(workflowId=up["id"], images=[], values={},
+                                 version=self.store.describe(up, OBJECT_INFO)["version"]))
 
     async def test_comfy_error(self):
         _, err = await self.assertRefused("comfy", client=FakeComfy(script=[{"type": "error", "message": "CUDA out of memory", "node": "3"}]))
@@ -160,6 +163,97 @@ class RunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.canceled, ["p1"])
         self.assertFalse(await runner.cancel("job1"), "finished jobs can't be canceled")
 
+    async def test_an_abandoned_run_is_taken_out_of_comfyui(self):
+        """0.2.2: a same-computer tab closed mid-run surfaces as a failed progress write. The prompt
+        used to stay queued and later run on inputs the cleanup had deleted."""
+        client = FakeComfy()
+        runner = Runner(self.store, client, self.input_dir)
+
+        async def fetch(_k):
+            return PNG
+
+        async def nothing(*_a):
+            return None
+
+        async def emit(ev):
+            if ev["type"] == "progress":
+                raise ConnectionResetError("the tab went away")
+
+        with self.assertRaises(ConnectionResetError):
+            await runner.run(self.job(), fetch_input=fetch, put_output=nothing, emit=emit)
+        self.assertEqual(client.canceled, ["p1"])
+
+    async def test_a_task_cancel_takes_the_prompt_out_too(self):
+        client = FakeComfy(script=[])
+        gate = asyncio.Event()
+
+        async def hold():
+            gate.set()
+            await asyncio.sleep(60)
+        client.on_queued = hold
+        runner = Runner(self.store, client, self.input_dir)
+
+        async def fetch(_k):
+            return PNG
+
+        async def nothing(*_a):
+            return None
+        task = asyncio.ensure_future(runner.run(self.job(), fetch_input=fetch, put_output=nothing, emit=nothing))
+        await gate.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(client.canceled, ["p1"])
+
+    async def test_a_finished_or_refused_run_cancels_nothing(self):
+        client = FakeComfy()
+        await self.go(client, self.job())
+        self.assertEqual(client.canceled, [])
+        client, _ = await self.assertRefused("comfy", client=FakeComfy(script=[{"type": "error", "message": "x"}]))
+        self.assertEqual(client.canceled, [], "ComfyUI already ended it")
+
+
+def png_chunk(kind, payload):
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload))
+
+
+class NoWorkflowInTheResult(unittest.TestCase):
+    """0.2.2: Save Image writes the whole workflow into its PNG. The result leaves the computer
+    without it — the pixels' bytes untouched."""
+
+    def test_png_text_chunks_go(self):
+        ihdr = png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        idat = png_chunk(b"IDAT", zlib.compress(b"\0\xff\0\0"))
+        iend = png_chunk(b"IEND", b"")
+        sig = b"\x89PNG\r\n\x1a\n"
+        meta = png_chunk(b"tEXt", b"prompt\0{\"3\": {\"class_type\": \"KSampler\"}}") + png_chunk(b"iTXt", b"workflow\0\0\0\0\0{}")
+        out = strip_metadata(sig + ihdr + meta + idat + iend)
+        self.assertEqual(out, sig + ihdr + idat + iend)
+        self.assertEqual(strip_metadata(sig + ihdr + idat + iend), sig + ihdr + idat + iend, "a clean PNG is unchanged")
+
+    def test_jpeg_exif_and_comments_go(self):
+        app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\0" + b"\1\1\0\0\1\0\1\0\0"
+        app1 = b"\xff\xe1" + struct.pack(">H", 2 + 14) + b"Exif\0\0workflow"
+        com = b"\xff\xfe" + struct.pack(">H", 2 + 6) + b"prompt"
+        dqt = b"\xff\xdb" + struct.pack(">H", 4) + b"\0\0"
+        scan = b"\xff\xda\0\x02pixels\xff\xd9"
+        out = strip_metadata(b"\xff\xd8" + app0 + app1 + com + dqt + scan)
+        self.assertEqual(out, b"\xff\xd8" + app0 + dqt + scan)
+
+    def test_webp_exif_goes_and_its_flag_with_it(self):
+        def chunk(kind, payload):
+            return kind + struct.pack("<I", len(payload)) + payload + (b"\0" if len(payload) & 1 else b"")
+        vp8x = chunk(b"VP8X", bytes([0x0C | 0x10, 0, 0, 0]) + b"\0" * 6)
+        img = chunk(b"VP8L", b"pixels!")
+        exif = chunk(b"EXIF", b"Exif\0\0workflow")
+        body = vp8x + img + exif
+        out = strip_metadata(b"RIFF" + struct.pack("<I", len(body) + 4) + b"WEBP" + body)
+        want_body = chunk(b"VP8X", bytes([0x10, 0, 0, 0]) + b"\0" * 6) + img
+        self.assertEqual(out, b"RIFF" + struct.pack("<I", len(want_body) + 4) + b"WEBP" + want_body)
+
+    def test_bytes_that_dont_parse_pass_through(self):
+        self.assertEqual(strip_metadata(b"\x89PNG\r\n\x1a\n\0\0\0\x10tEXt"), b"\x89PNG\r\n\x1a\n\0\0\0\x10tEXt")
+        self.assertEqual(strip_metadata(b"not an image"), b"not an image")
 
 if __name__ == "__main__":
     unittest.main()

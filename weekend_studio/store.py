@@ -1,4 +1,6 @@
-"""Published workflows, kept on the user's own machine (ComfyUI/user/default/weekend-studio/).
+"""Published workflows, kept on the user's own machine, in the pack's own folder (home.py
+`workflows/`). Until 0.3.0 they sat in ComfyUI/user/default/weekend-studio/, which ComfyUI's
+userdata API serves for writing too — anyone reaching ComfyUI's port could plant a workflow there.
 
 A record is what the user published — name, API-format graph, marks, times. The description is
 built from it on demand against the CURRENT /object_info, so a node uninstalled since publishing
@@ -8,10 +10,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import tempfile
 import time
 
-from .description import ID_RE, LIMITS, build_description
+from .description import ID_RE, LIMITS, build_description, clean_hidden_in
 
 MAX_GRAPH_BYTES = 5 * 1024 * 1024
 MAX_WORKFLOWS = 200
@@ -26,6 +29,12 @@ class StoreError(Exception):
 def slugify(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:56].strip("-")
     return s or "workflow"
+
+
+def new_id(name: str) -> str:
+    """`<slug>-<6 hex>` (0.3.0, security review B2): a name slug alone ("txt2img", "flux") was the same
+    on every ComfyUI, so a workflow file from someone else carrying that id overwrote yours."""
+    return f"{slugify(name)}-{secrets.token_hex(3)}"
 
 
 def check_graph(graph) -> None:
@@ -86,21 +95,34 @@ class WorkflowStore:
         if marks is not None and not isinstance(marks, list):
             raise StoreError("bad-marks", "marks must be a list")
         now = int(time.time())
+        prev_hidden = []
         if workflow_id:
             prev = self.get(workflow_id)
             created = prev.get("published_at", now)
+            prev_hidden = clean_hidden_in(prev.get("hidden_in"))
         else:
             existing = {r["id"] for r in self.list()}
             if len(existing) >= MAX_WORKFLOWS:
                 raise StoreError("too-many", f"at most {MAX_WORKFLOWS} published workflows")
-            base = slugify(name)
-            workflow_id, n = base, 2
+            workflow_id = new_id(name)
             while workflow_id in existing:
-                workflow_id = f"{base}-{n}"
-                n += 1
+                workflow_id = new_id(name)
             created = now
         rec = {"id": workflow_id, "name": name, "graph": graph, "marks": marks or [],
                "published_at": created, "updated_at": now}
+        if workflow_id and prev_hidden:
+            rec["hidden_in"] = prev_hidden   # republishing keeps where it shows
+        self._write(workflow_id, rec)
+        return rec
+
+    def set_hidden_in(self, workflow_id: str, hidden_in) -> dict:
+        """The tab's "Show in": which Weekend Studio apps this workflow stays out of. Only the list
+        changes — not the graph, marks or version — so nothing open goes stale."""
+        if not isinstance(hidden_in, list):
+            raise StoreError("bad-apps", "hiddenIn must be a list of app ids")
+        rec = self.get(workflow_id)
+        rec["hidden_in"] = clean_hidden_in(hidden_in)
+        rec["updated_at"] = int(time.time())
         self._write(workflow_id, rec)
         return rec
 
@@ -111,7 +133,8 @@ class WorkflowStore:
             raise StoreError("not-found", "no such workflow") from None
 
     def describe(self, rec: dict, object_info: dict) -> dict:
-        return build_description(rec["id"], rec["name"], rec["graph"], object_info, rec.get("marks") or None)
+        return build_description(rec["id"], rec["name"], rec["graph"], object_info, rec.get("marks") or None,
+                                 rec.get("hidden_in"))
 
     def _write(self, workflow_id: str, rec: dict) -> None:
         os.makedirs(self.root, exist_ok=True)

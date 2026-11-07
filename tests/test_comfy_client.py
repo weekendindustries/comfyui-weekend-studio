@@ -70,3 +70,89 @@ class HistoryRace(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await c.outputs("p1"), {})
         finally:
             cc.HISTORY_WAIT_STEP = step
+
+
+class RequiredInput(unittest.TestCase):
+    def test_missing_wire_reads_plainly(self):
+        body = {"error": {"type": "prompt_outputs_failed_validation", "message": "Prompt outputs failed validation"},
+                "node_errors": {"20": {"class_type": "WeekendOutput", "errors": [{"type": "required_input_missing", "message": "Required input is missing", "details": "images"}]}}}
+        self.assertEqual(prompt_error(body), "Prompt outputs failed validation — Weekend Output: the “images” input isn't connected")
+
+
+class DroppedFromTheQueue(unittest.IsolatedAsyncioTestCase):
+    """0.2.2: a prompt deleted while it waited sends no event and gets no history entry. Waiting for
+    either hung the run (and a bridge slot) for two hours."""
+
+    def client(self, history, queue):
+        c = ComfyClient("http://127.0.0.1:8188")
+        h, q = list(history), list(queue)
+
+        async def _history(_pid):
+            return h.pop(0) if h else None
+
+        async def _queued(_pid):
+            return q.pop(0) if q else False
+        c._history, c._queued = _history, _queued
+        return c
+
+    async def test_gone_from_queue_and_history_is_interrupted(self):
+        self.assertEqual(await self.client([None, None], [False])._where("p1"), {"type": "interrupted"})
+
+    async def test_still_waiting_or_running_is_not_over(self):
+        self.assertIsNone(await self.client([None], ["pending"])._where("p1"))
+        self.assertIsNone(await self.client([None], ["running"])._where("p1"))
+
+    async def test_finished_between_the_two_questions(self):
+        done = {"status": {"completed": True}, "outputs": {"9": {}}}
+        self.assertEqual(await self.client([None, done], [False])._where("p1"), {"type": "done"})
+
+    async def test_an_unreadable_queue_concludes_nothing(self):
+        self.assertIsNone(await self.client([None], [None])._where("p1"))
+
+    def test_reading_the_queue(self):
+        from weekend_studio.comfy_client import queue_state
+        q = {"queue_running": [[3, "p-run", {}, {}, []]], "queue_pending": [[4, "p-wait", {}, {}, []]]}
+        self.assertEqual(queue_state(q, "p-run"), "running")
+        self.assertEqual(queue_state(q, "p-wait"), "pending")
+        self.assertIs(queue_state(q, "p-gone"), False)
+        self.assertIsNone(queue_state("junk", "p1"))
+
+
+class _Ctx:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_a):
+        return False
+
+
+class CancelInterruptsOnlyItsOwnRun(unittest.IsolatedAsyncioTestCase):
+    """Old ComfyUI ignores prompt_id on /interrupt and stops whatever runs: only interrupt when the
+    prompt being canceled is the one running."""
+
+    async def calls_for(self, where):
+        c = ComfyClient("http://127.0.0.1:8188")
+        posts = []
+
+        class S:
+            def post(self, url, json=None):
+                posts.append(url.rsplit("/", 1)[-1])
+                return _Ctx()
+
+        async def http():
+            return S()
+
+        async def queued(_pid):
+            return where
+        c._http, c._queued = http, queued
+        await c.cancel("p1")
+        return posts, c
+
+    async def test_a_waiting_prompt_is_only_dropped(self):
+        posts, c = await self.calls_for(False)
+        self.assertEqual(posts, ["queue"])
+        self.assertIn("p1", c._canceling, "the run loop checks on it sooner")
+
+    async def test_the_running_prompt_is_interrupted(self):
+        posts, _ = await self.calls_for("running")
+        self.assertEqual(posts, ["queue", "interrupt"])

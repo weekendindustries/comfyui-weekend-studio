@@ -49,14 +49,19 @@ def _ref_widget():
 
 
 class WeekendImageIn:
-    DESCRIPTION = "A picture from Weekend Studio: the generation area, the active layer or the whole canvas."
+    """`provided` (2026-11-06) says whether Weekend Studio sent this picture, for a Switch. A reference
+    is always optional: when none is sent it yields a small black stand-in and provided = False rather
+    than failing, so the workflow can leave it out (Flux3 Klein Edit appends a reference only when sent)."""
+    DESCRIPTION = ("A picture from Weekend Studio: the generation area, the active layer, the whole canvas, "
+                   "or a reference picture. 'provided' is yes when Weekend Studio sent it.")
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "source": (["area", "layer", "canvas"], {"default": "area",
-                           "tooltip": "What Weekend Studio sends: the generation area, the active layer, or the whole canvas."}),
+                "source": (["area", "layer", "canvas", "reference"], {"default": "area",
+                           "tooltip": "What Weekend Studio sends: the generation area, the active layer, the whole canvas, "
+                                      "or a reference picture (optional: 'provided' is no when none is sent)."}),
                 "label": ("STRING", {"default": "Image", "multiline": False,
                           "tooltip": "The name Weekend Studio shows for this picture."}),
             },
@@ -66,8 +71,8 @@ class WeekendImageIn:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("image", "mask")
+    RETURN_TYPES = ("IMAGE", "MASK", "BOOLEAN")
+    RETURN_NAMES = ("image", "mask", "provided")
     FUNCTION = "load"
     CATEGORY = CATEGORY
 
@@ -81,9 +86,11 @@ class WeekendImageIn:
                 mask = (1.0 - torch.from_numpy(alpha))[None,]
             else:
                 mask = torch.zeros((1, rgb.shape[0], rgb.shape[1]), dtype=torch.float32)
-            return (image, mask)
+            return (image, mask, True)
         if fallback is not None:
-            return (fallback, torch.zeros((fallback.shape[0], fallback.shape[1], fallback.shape[2]), dtype=torch.float32))
+            return (fallback, torch.zeros((fallback.shape[0], fallback.shape[1], fallback.shape[2]), dtype=torch.float32), False)
+        if source == "reference":
+            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), torch.zeros((1, 64, 64), dtype=torch.float32), False)
         raise ValueError(f"Weekend Image In ({label}): no picture. It comes from Weekend Studio — "
                          "connect a fallback image to try the workflow here.")
 
@@ -161,13 +168,47 @@ class WeekendOutput:
         return {"ui": {"images": results}}
 
 
+def mask_is_empty(mask, threshold: float = 0.0) -> bool:
+    """True when no value of `mask` is above `threshold` (an all-black mask is empty). Pure."""
+    if mask is None or mask.numel() == 0:
+        return True
+    return bool(mask.max().item() <= threshold)
+
+
+class WeekendIsEmpty:
+    """A yes/no for Switch nodes, from ComfyUI's own types only. The bundled Flux3 Klein Edit uses it
+    for "is the area blank? then make a picture rather than edit one" (2026-11-06; it needed
+    ComfyUI-Easy-Use's isMaskEmpty before, a whole pack for one check)."""
+    DESCRIPTION = "Yes when the mask is empty: no value above the threshold. Connect it to a Switch node."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mask": ("MASK",),
+                "threshold": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                              "tooltip": "Values at or below this count as empty."}),
+            },
+        }
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("empty",)
+    FUNCTION = "check"
+    CATEGORY = CATEGORY
+
+    def check(self, mask, threshold=0.0):
+        return (mask_is_empty(mask, threshold),)
+
+
 NODE_CLASS_MAPPINGS = {
     "WeekendImageIn": WeekendImageIn,
     "WeekendMaskIn": WeekendMaskIn,
     "WeekendOutput": WeekendOutput,
+    "WeekendIsEmpty": WeekendIsEmpty,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WeekendImageIn": "Weekend Image In",
     "WeekendMaskIn": "Weekend Mask In",
     "WeekendOutput": "Weekend Output",
+    "WeekendIsEmpty": "Weekend Is Empty",
 }

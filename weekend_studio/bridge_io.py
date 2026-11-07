@@ -12,17 +12,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def service_config() -> dict:
-    """Where Weekend Studio is. service.json is written from the app's env at release
-    (comfy-node/tools/write-service-json.mjs); WEEKEND_STUDIO_* env vars override it."""
+    """Where Weekend Studio is: service.json, written at release (comfy-node/tools/write-service-json.mjs)
+    and shipped in the package. Nothing here comes from environment variables (0.3.2); a development
+    copy writes its own service.json.
+
+    `publicAnonKey` is Supabase's PUBLIC project key (sb_publishable_…), the same one every page of
+    the website ships. It is not a secret and grants nothing by itself: it only says which project
+    the edge functions belong to. Each call is authorized by a one-time pairing secret or by this
+    machine's own token."""
     try:
         with open(os.path.join(HERE, "service.json"), "r", encoding="utf-8") as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         cfg = {}
     return {
-        "functionsUrl": os.environ.get("WEEKEND_STUDIO_FUNCTIONS_URL") or cfg.get("functionsUrl", ""),
-        "apiKey": os.environ.get("WEEKEND_STUDIO_API_KEY") or cfg.get("apiKey", ""),
-        "appUrl": os.environ.get("WEEKEND_STUDIO_APP_URL") or cfg.get("appUrl", ""),
+        "functionsUrl": cfg.get("functionsUrl", ""),
+        "publicAnonKey": cfg.get("publicAnonKey", ""),
+        "appUrl": cfg.get("appUrl", ""),
         # Sites allowed to use same-computer mode (local_server.py); defaults to Weekend Studio's own.
         "localOrigins": cfg.get("localOrigins"),
     }
@@ -46,12 +52,12 @@ class _Session:
 class Api:
     def __init__(self, config: dict, session: _Session | None = None):
         self.base = config["functionsUrl"].rstrip("/")
-        self.key = config["apiKey"]
+        self.key = config.get("publicAnonKey") or config.get("apiKey") or ""
         self.session = session or _Session()
 
     async def _post(self, fn: str, body: dict) -> dict:
         s = await self.session.get()
-        # The publishable key only — no Authorization: the node has no session, and the functions
+        # The public project key only — no Authorization: the node has no session, and the functions
         # authenticate it by its machine token or poll secret.
         async with s.post(f"{self.base}/{fn}", json=body, headers={"apikey": self.key}) as r:
             try:

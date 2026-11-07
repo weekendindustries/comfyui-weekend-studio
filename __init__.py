@@ -13,6 +13,10 @@ try:
 except ImportError:  # imported outside ComfyUI (tests, tooling)
     PromptServer = None
 
+# Registers the tab's /weekend-studio/* routes on ComfyUI's own server. That is all an import does
+# (0.3.0): no second server and no outbound connection start here. The relay connection starts when
+# the user clicks Connect in the tab; same-computer mode when they turn it on there. See README.md,
+# "Network and data".
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
     from .weekend_studio import routes as _routes
 

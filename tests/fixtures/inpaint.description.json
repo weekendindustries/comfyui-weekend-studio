@@ -2,7 +2,7 @@
   "format": 1,
   "id": "inpaint",
   "name": "Inpaint",
-  "version": "dfdf36898608b426e052",
+  "version": "8caf49c1508f5f1b9510",
   "inputs": [
     {
       "key": "6.text",

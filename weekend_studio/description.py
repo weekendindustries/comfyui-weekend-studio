@@ -35,11 +35,16 @@ LIMITS = {
     "option": 512,
     "text_default": 20_000,
     "text_max": 100_000,
+    # A text setting that isn't a prompt (0.3.0, security review B3): its maxLength in the description,
+    # so the app's form and both validators stop it there. Prompts keep text_default.
+    "text_other": 4_000,
+    "apps": 32,   # entries in hiddenIn
 }
 
 # JSON numbers stop being exact in a browser past 2^53-1; ComfyUI seeds go to 2^64-1. Every
 # integer's max is clamped to this so both sides agree on what a value can be.
 MAX_SAFE = 2**53 - 1
+FLOAT_LIMIT = 1e9                # a float setting's range when its node gives none (or a non-finite one)
 
 KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -75,6 +80,74 @@ SAVE_NODES = ("SaveImage", "PreviewImage")
 CONDITIONING_SOURCES = (("positive", "positive"), ("negative", "negative"), ("conditioning", "positive"))
 
 
+# ── What may never be set from the web (0.3.0, security review B3) ──────────────────────────────
+# Any marked setting can be changed by whoever can send this ComfyUI a run: a browser signed in to
+# the account (through the relay), or a page on Weekend Studio's own site (same-computer mode). A
+# free-text setting that is really a file path, a URL or code would turn one bug on that site into
+# writing files — or running code — on this computer. So a text setting is refused when its name
+# says path/file/folder/url/code…, or when its node's name says it runs code, unless it is a
+# prompt box of a text encoder. Numbers, switches and dropdowns stay allowed: a dropdown value is
+# checked against ComfyUI's own list on every run.
+# Mirrored in web/weekend_studio.js (REFUSED_WORDS / REFUSED_NODE_WORDS); tests/test_refusals.py
+# checks the two lists agree.
+REFUSED_WORDS = frozenset((
+    "path", "paths", "filepath", "file", "files", "filename", "filenames", "dir", "dirs", "directory",
+    "folder", "folders", "url", "urls", "uri", "link", "code", "script", "command", "cmd", "expr",
+    "expression", "eval", "exec", "python", "shell", "module", "import",
+))
+REFUSED_NODE_WORDS = frozenset((
+    "python", "exec", "execute", "eval", "shell", "script", "command", "cmd", "code", "expr", "expression",
+    "subprocess", "bash", "powershell", "terminal", "javascript", "lambda",
+))
+
+
+def words(name) -> set:
+    """'filename_prefix' → {filename, prefix}; 'RunPythonCode' → {run, python, code}."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(name or ""))
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    return {w for w in re.split(r"[^A-Za-z0-9]+", s.lower()) if w}
+
+
+def is_prompt_box(class_info: dict, input_name: str) -> bool:
+    """A text encoder's prompt: the node outputs CONDITIONING and the widget is multiline text."""
+    spec = widget_spec(class_info, input_name)
+    return "CONDITIONING" in (class_info.get("output") or []) and bool(spec and spec[0] == "STRING" and spec[2].get("multiline"))
+
+
+def remote_refusal(class_type: str, class_info: dict, input_name: str):
+    """Why this widget can't be shown in Weekend Studio, in words, or None when it can."""
+    spec = widget_spec(class_info, input_name)
+    if spec is None or spec[0] != "STRING":
+        return None
+    node_words = words(class_type) | words(class_info.get("display_name")) | words(class_info.get("name"))
+    if node_words & REFUSED_NODE_WORDS:
+        return "its node looks like it runs code"
+    if is_prompt_box(class_info, input_name):
+        return None
+    if words(input_name) & REFUSED_WORDS:
+        return "it looks like a file path, a web address or code"
+    return None
+
+
+def mark_refusals(graph: dict, object_info: dict, marks) -> list:
+    """The ticked settings left out by remote_refusal, as sentences for the ComfyUI tab."""
+    out = []
+    for m in marks or []:
+        if not isinstance(m, dict):
+            continue
+        nid, name = str(m.get("node", "")), str(m.get("input", ""))
+        node = graph.get(nid) if isinstance(graph, dict) else None
+        cls = node.get("class_type") if isinstance(node, dict) else None
+        if cls not in object_info or name not in (node.get("inputs") or {}):
+            continue
+        why = remote_refusal(cls, object_info[cls], name)
+        if why:
+            title = ((node.get("_meta") or {}).get("title") or object_info[cls].get("display_name") or cls).strip()
+            out.append(f"\u201c{title}: {name}\u201d can\u2019t be shown in Weekend Studio: {why}, and anyone who can reach "
+                       "the form could set it. It runs with the value saved in the workflow.")
+    return out
+
+
 # ── Building ────────────────────────────────────────────────────────────────────────────────────
 
 def is_link(value) -> bool:
@@ -104,10 +177,13 @@ def widget_spec(class_info: dict, name: str):
     return None
 
 
-def make_input(node_id, input_name, class_info, current, label, *, group=None, role=None, help=None, overrides=None):
+def make_input(node_id, input_name, class_info, current, label, *, group=None, role=None, help=None, overrides=None,
+               class_type=None):
     """One description input from a widget, or None when the widget can't be offered."""
     spec = widget_spec(class_info, input_name)
     if spec is None or is_link(current):
+        return None
+    if remote_refusal(class_type or class_info.get("name") or "", class_info, input_name):
         return None
     kind, options, cfg = spec
     o = overrides or {}
@@ -115,10 +191,13 @@ def make_input(node_id, input_name, class_info, current, label, *, group=None, r
 
     if kind in ("INT", "FLOAT"):
         is_int = kind == "INT"
-        lo = cfg.get("min", -MAX_SAFE if is_int else -1e9)
-        hi = cfg.get("max", MAX_SAFE if is_int else 1e9)
-        if is_int:
-            lo, hi = max(int(lo), -MAX_SAFE), min(int(hi), MAX_SAFE)
+        # A node pack may declare min/max as ±Infinity, NaN or a string. Infinity would reach the app
+        # as bare `Infinity` — not JSON, so /v1/hello stopped parsing and same-computer mode broke —
+        # and int(inf) raised. Anything that isn't a finite number falls back to the widest range.
+        lo = _bound(cfg.get("min"), -MAX_SAFE if is_int else -FLOAT_LIMIT, is_int)
+        hi = _bound(cfg.get("max"), MAX_SAFE if is_int else FLOAT_LIMIT, is_int)
+        if lo > hi:
+            lo, hi = hi, lo
         lo, hi = _narrow(lo, hi, o, is_int)
         seedish = is_int and (input_name in ("seed", "noise_seed") or cfg.get("control_after_generate"))
         inp["type"] = "seed" if seedish else ("int" if is_int else "float")
@@ -126,7 +205,9 @@ def make_input(node_id, input_name, class_info, current, label, *, group=None, r
         step = o.get("step", cfg.get("step"))
         if _num(step) and step > 0:
             inp["step"] = int(step) if is_int and float(step).is_integer() else step
-        dflt = current if _num(current) else cfg.get("default", lo)
+        dflt = current if _num(current) else cfg.get("default")
+        if not _num(dflt):
+            dflt = lo
         if is_int:
             dflt = int(dflt) if _num(dflt) and float(dflt).is_integer() else lo
         inp["default"] = min(hi, max(lo, dflt))
@@ -134,8 +215,13 @@ def make_input(node_id, input_name, class_info, current, label, *, group=None, r
         inp["type"] = "text"
         if cfg.get("multiline"):
             inp["multiline"] = True
+        # A prompt keeps the long limit; any other text is capped shorter (B3).
+        prompt = is_prompt_box(class_info, input_name) or o.get("role", role) in ("prompt", "negative")
+        cap = LIMITS["text_default"] if prompt else LIMITS["text_other"]
+        if not prompt:
+            inp["maxLength"] = cap
         inp["default"] = current if isinstance(current, str) else str(cfg.get("default", ""))
-        inp["default"] = inp["default"][: LIMITS["text_default"]]
+        inp["default"] = inp["default"][:cap]
     elif kind == "BOOLEAN":
         inp["type"] = "bool"
         inp["default"] = current if isinstance(current, bool) else bool(cfg.get("default", False))
@@ -158,6 +244,13 @@ def make_input(node_id, input_name, class_info, current, label, *, group=None, r
     if r in ROLES:
         inp["role"] = r
     return inp
+
+
+def _bound(v, fallback, is_int):
+    """A finite min/max from a node's spec; integers clamped to what a browser holds exactly."""
+    if not _num(v):
+        return fallback
+    return int(max(-MAX_SAFE, min(MAX_SAFE, v))) if is_int else v
 
 
 def _narrow(lo, hi, o, is_int):
@@ -255,13 +348,13 @@ def default_inputs(graph, object_info):
         if name not in ("text",):
             label = f"{label} ({name})"
         inp = make_input(nid, name, object_info[graph[nid]["class_type"]], graph[nid]["inputs"][name], label,
-                         role="prompt" if i == 0 else None)
+                         role="prompt" if i == 0 else None, class_type=graph[nid]["class_type"])
         if inp:
             out.append(inp)
     for i, (nid, name, _side) in enumerate(neg):
         label = _title(graph, nid, object_info) or ("Negative prompt" if i == 0 else f"Negative prompt {i + 1}")
         inp = make_input(nid, name, object_info[graph[nid]["class_type"]], graph[nid]["inputs"][name], label,
-                         role="negative" if i == 0 else None)
+                         role="negative" if i == 0 else None, class_type=graph[nid]["class_type"])
         if inp:
             out.append(inp)
 
@@ -285,7 +378,7 @@ def default_inputs(graph, object_info):
                 if name not in (graph[nid].get("inputs") or {}):
                     continue
                 inp = make_input(nid, name, object_info[cls], graph[nid]["inputs"][name], LABELS.get(name, name),
-                                 group=group, role=SIZE_ROLES.get(name) if group == "Size" else None)
+                                 group=group, role=SIZE_ROLES.get(name) if group == "Size" else None, class_type=cls)
                 if inp:
                     out.append(inp)
     return out
@@ -302,21 +395,35 @@ def bridge_inputs(graph, object_info):
         inputs = node.get("inputs") or {}
         label = inputs.get("label") if isinstance(inputs.get("label"), str) and inputs.get("label").strip() else None
         if cls == IMAGE_IN:
-            source = inputs.get("source") if inputs.get("source") in ("area", "layer", "canvas") else "area"
-            inp = {"type": "image", "role": source, "label": (label or "Image")[: LIMITS["label"]]}
+            source = inputs.get("source") if inputs.get("source") in ("area", "layer", "canvas", "reference") else "area"
+            inp = {"type": "image", "role": source,
+                   "label": (label or ("Reference" if source == "reference" else "Image"))[: LIMITS["label"]]}
         else:
             inp = {"type": "mask", "role": "mask", "label": (label or "Mask")[: LIMITS["label"]]}
         inp = {"key": f"{nid}.{REF_INPUT}", "node": nid, "input": REF_INPUT, **inp}
-        if is_link(inputs.get("fallback")):
-            inp["optional"] = True   # runs on its own fallback when the app sends nothing
+        # Runs on its own fallback when the app sends nothing; a reference runs without one at all
+        # (the node says provided = False, 2026-11-06).
+        if is_link(inputs.get("fallback")) or inp.get("role") == "reference":
+            inp["optional"] = True
         out.append(inp)
     return out
 
 
 def marked_inputs(graph, object_info, marks):
     """The settings the user ticked in ComfyUI. A mark for a wire, a missing node or an unknown
-    widget is skipped, not an error: a workflow edited after marking still publishes."""
+    widget is skipped, not an error: a workflow edited after marking still publishes.
+
+    A mark without a role gets the one the same setting has unmarked: the first positive prompt is
+    THE prompt (the app's own prompt box fills it), the first negative is the negative, a latent's
+    width/height are the size. Ticking the prompt used to drop its role, so Images showed it as a
+    second text box beside its own and never filled it (first real-ComfyUI test, 2026-11-06)."""
     out = []
+    roles = {}
+    prompts = text_encoders(graph, object_info)
+    for side, role in (("positive", "prompt"), ("negative", "negative")):
+        first = next(((n, t) for n, t, s in prompts if s == side), None)
+        if first:
+            roles.setdefault(first, role)
     for m in marks:
         if not isinstance(m, dict):
             continue
@@ -336,18 +443,44 @@ def marked_inputs(graph, object_info, marks):
         default_label = LABELS.get(name) or name.replace("_", " ").capitalize()
         title = _title(graph, nid, object_info)
         label = str(m.get("label") or (f"{title}: {default_label}" if title else default_label))
-        inp = make_input(nid, name, object_info[cls], node["inputs"][name], label, overrides=m)
+        role = roles.get((nid, name))
+        if role is None and name in SIZE_ROLES and cls in ("EmptyLatentImage", "EmptySD3LatentImage"):
+            role = SIZE_ROLES[name]
+        inp = make_input(nid, name, object_info[cls], node["inputs"][name], label, role=role, overrides=m, class_type=cls)
         if inp:
             out.append(inp)
     return out
 
 
+def connected_output(node) -> bool:
+    """An image output node with its picture actually wired in."""
+    return is_link((node.get("inputs") or {}).get("images"))
+
+
 def outputs_of(graph):
+    """Where the result comes from: Weekend Output, else Save Image, else Preview Image — only the
+    CONNECTED ones (an unwired one is left out of runs; output_problems says so at publish)."""
     for classes in ((OUTPUT,), SAVE_NODES[:1], SAVE_NODES[1:]):
-        found = [nid for nid in sorted(graph, key=node_order) if graph[nid].get("class_type") in classes]
+        found = [nid for nid in sorted(graph, key=node_order)
+                 if graph[nid].get("class_type") in classes and connected_output(graph[nid])]
         if found:
             return [{"node": nid, "kind": "image"} for nid in found[: LIMITS["outputs"]]]
     return []
+
+
+def output_problems(graph) -> list:
+    """What the person should fix in ComfyUI, in words — shown in the tab when they publish.
+    (Seen 2026-10-14: an unwired Weekend Output failed every run with "WeekendOutput: images".)"""
+    problems = []
+    for nid in sorted(graph, key=node_order):
+        node = graph[nid]
+        if node.get("class_type") in (OUTPUT,) + SAVE_NODES and not connected_output(node):
+            title = ((node.get("_meta") or {}).get("title") or node.get("class_type")).strip()
+            problems.append(f"{title} isn't connected: connect its images input to the picture you want back. "
+                            "Until then it's left out of runs.")
+    if not outputs_of(graph):
+        problems.append("Nothing comes back yet: add a Weekend Output (or Save Image) node and connect your final image to it.")
+    return problems
 
 
 def dedupe_labels(inputs, graph):
@@ -367,15 +500,26 @@ def dedupe_labels(inputs, graph):
     return unique
 
 
-def version_of(name: str, graph: dict, marks) -> str:
+def version_of(name: str, graph: dict, marks, shown=()) -> str:
     """Hash of what the user PUBLISHED (graph, marks, name) — not of /object_info, so installing a
-    new LoRA doesn't make every open form stale. Option lists are checked per run instead."""
+    new LoRA doesn't make every open form stale. Option lists are checked per run instead.
+
+    The values of the settings the app shows (`shown`: (node, input) pairs) are left out (0.2.2):
+    the app sends its own value for each of them, so a new default — a seed ComfyUI re-rolled, a
+    prompt edited in ComfyUI — changes nothing a run depends on, and mustn't make open forms stale."""
+    if shown:
+        graph = copy.deepcopy(graph)
+        for nid, name_ in shown:
+            inputs = (graph.get(nid) or {}).get("inputs")
+            if isinstance(inputs, dict) and name_ in inputs:
+                inputs[name_] = None
     blob = json.dumps({"name": name, "graph": graph, "marks": marks or []}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
 
 
-def build_description(workflow_id: str, name: str, graph: dict, object_info: dict, marks=None) -> dict:
-    """The description for one published workflow, against the ComfyUI it runs on right now."""
+def build_description(workflow_id: str, name: str, graph: dict, object_info: dict, marks=None, hidden_in=None) -> dict:
+    """The description for one published workflow, against the ComfyUI it runs on right now.
+    `hidden_in`: the Weekend Studio apps it's hidden from (the tab's "Show in"); left out of `version`."""
     graph = copy.deepcopy(graph)
     missing = sorted({n.get("class_type") for n in graph.values() if n.get("class_type") not in object_info})
     known = {nid: n for nid, n in graph.items() if n.get("class_type") in object_info}
@@ -392,13 +536,27 @@ def build_description(workflow_id: str, name: str, graph: dict, object_info: dic
         "format": FORMAT_VERSION,
         "id": workflow_id,
         "name": name[: LIMITS["name"]],
-        "version": version_of(name, graph, marks),
+        "version": version_of(name, graph, marks, [(i["node"], i["input"]) for i in inputs]),
         "inputs": inputs,
         "outputs": outputs_of(known),
     }
     if missing:
         d["missing"] = missing
+    hidden = clean_hidden_in(hidden_in)
+    if hidden:
+        d["hiddenIn"] = hidden
     return d
+
+
+def clean_hidden_in(hidden_in) -> list:
+    """The app ids a workflow is hidden from, deduplicated and capped; anything unreadable is dropped."""
+    if not isinstance(hidden_in, list):
+        return []
+    out = []
+    for a in hidden_in:
+        if isinstance(a, str) and ID_RE.match(a) and a not in out:
+            out.append(a)
+    return out[: LIMITS["apps"]]
 
 
 # ── Checking (mirrors packages/comfy/description.js) ────────────────────────────────────────────
@@ -444,6 +602,10 @@ def validate_description(d) -> dict:
         err("version", "not a hex hash")
     if "missing" in d and (not isinstance(d["missing"], list) or not all(_str(m, 200) for m in d["missing"])):
         err("missing", "not a list of node names")
+    # The apps its owner hid it from (the tab's "Show in"). Display only: not in `version`.
+    if "hiddenIn" in d and (not isinstance(d["hiddenIn"], list) or len(d["hiddenIn"]) > LIMITS["apps"]
+                            or not all(isinstance(a, str) and ID_RE.match(a) for a in d["hiddenIn"])):
+        err("hiddenIn", "not a list of app ids")
 
     inputs = d.get("inputs")
     if not isinstance(inputs, list):
@@ -492,6 +654,37 @@ def validate_description(d) -> dict:
             if not isinstance(o, dict) or not isinstance(o.get("node"), str) or not NODE_RE.match(o["node"]) or o.get("kind") != "image":
                 err(f"outputs[{i}]", "bad output")
     return {"ok": not errors, "errors": errors}
+
+
+PROBLEM_WORDS = {
+    "bad key": "its name has characters Weekend Studio doesn't accept",
+    "bad input name": "its name has characters Weekend Studio doesn't accept",
+    "bad node id": "its node's id has characters Weekend Studio doesn't accept",
+    "duplicate": "it's listed twice",
+    "missing or too long": "its name is missing or longer than 80 characters",
+    "bad range": "its lowest and highest values don't fit together",
+    "outside range": "its current value is outside its range",
+}
+
+
+def description_problems(d) -> list:
+    """validate_description's errors in words for the ComfyUI tab (0.2.2). The app drops a workflow
+    whose description doesn't pass, without a word — so say it here, where it can be fixed."""
+    checked = validate_description(d)
+    if checked["ok"]:
+        return []
+    inputs = d.get("inputs") if isinstance(d, dict) and isinstance(d.get("inputs"), list) else []
+    lines = []
+    for e in checked["errors"]:
+        path, _, why = e.partition(": ")
+        m = re.match(r"^inputs\[(\d+)\]", path)
+        inp = inputs[int(m.group(1))] if m and int(m.group(1)) < len(inputs) else None
+        label = inp.get("label") or inp.get("key") if isinstance(inp, dict) else None
+        why = PROBLEM_WORDS.get(why, why)
+        lines.append(f"\u201c{label}\u201d: {why}" if label else f"{path}: {why}")
+    more = f" (and {len(lines) - 3} more)" if len(lines) > 3 else ""
+    return [f"Weekend Studio can't show this workflow until this is fixed \u2014 {'; '.join(lines[:3])}{more}. "
+            "Untick that setting, or rename it with plain letters and numbers."]
 
 
 def _check_type_fields(inp, p, err):

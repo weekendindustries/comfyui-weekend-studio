@@ -48,6 +48,8 @@
     { "name": "wrong format", "patch": { "format": 2 }, "error": "format" },
     { "name": "bad id", "patch": { "id": "Has Spaces" }, "error": "id" },
     { "name": "bad version", "patch": { "version": "xyz" }, "error": "version" },
+    { "name": "hiddenIn not a list", "patch": { "hiddenIn": "moods" }, "error": "hiddenIn" },
+    { "name": "hiddenIn not app ids", "patch": { "hiddenIn": ["Moods!"] }, "error": "hiddenIn" },
     { "name": "duplicate key", "patchInputs": [{ "key": "1.text", "node": "1", "input": "text", "label": "Again", "type": "text", "default": "" }], "error": "duplicate" },
     { "name": "choice default not an option", "patchInputs": [{ "key": "5.c", "node": "5", "input": "c", "label": "C", "type": "choice", "options": ["a"], "default": "b" }], "error": "not an option" },
     { "name": "inverted range", "patchInputs": [{ "key": "5.n", "node": "5", "input": "n", "label": "N", "type": "int", "min": 10, "max": 1, "default": 5 }], "error": "bad range" },

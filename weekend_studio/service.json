@@ -1,5 +1,6 @@
 {
   "functionsUrl": "https://hkuhwwxkwftncbyssrwo.supabase.co/functions/v1",
-  "apiKey": "sb_publishable_NMkzWTUVul46rJ71ouqrTQ_HzsoQ3pR",
-  "appUrl": "https://weekendindustries.app"
+  "publicAnonKey": "sb_publishable_NMkzWTUVul46rJ71ouqrTQ_HzsoQ3pR",
+  "_publicAnonKey": "Supabase's public project key, the same one the Weekend Studio website ships. Not a secret: every call is authorized by a one-time pairing secret or this machine's own token.",
+  "appUrl": "https://weekendstudio.app"
 }

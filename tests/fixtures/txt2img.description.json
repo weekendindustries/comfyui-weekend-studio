@@ -2,7 +2,7 @@
   "format": 1,
   "id": "txt2img",
   "name": "Txt2img",
-  "version": "dc7b0df77a5a5e626604",
+  "version": "40aed57b4a9f882ec3a4",
   "inputs": [
     {
       "key": "6.text",

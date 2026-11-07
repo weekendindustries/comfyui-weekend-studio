@@ -12,10 +12,13 @@ const url = env.VITE_SUPABASE_URL, key = env.VITE_SUPABASE_ANON_KEY;
 if (!url || !key) throw new Error('VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY missing from apps/weekend/.env');
 if (!/^sb_publishable_/.test(key)) throw new Error('expected a publishable key (sb_publishable_…), never a secret one');
 const staging = process.argv.includes('--staging');
+// `publicAnonKey` (0.3.0; was `apiKey`): the name says what it is, for the Registry's reviewers and
+// secret scanners — Supabase's public project key, not a credential.
 const out = {
   functionsUrl: `${url.replace(/\/$/, '')}/functions/v1`,
-  apiKey: key,
-  appUrl: staging ? 'https://studio.weekendindustries.dev' : 'https://weekendindustries.app',
+  publicAnonKey: key,
+  _publicAnonKey: "Supabase's public project key, the same one the Weekend Studio website ships. Not a secret: every call is authorized by a one-time pairing secret or this machine's own token.",
+  appUrl: staging ? 'https://studio.weekendindustries.dev' : 'https://weekendstudio.app',
 };
 writeFileSync(fileURLToPath(new URL('../weekend_studio/service.json', import.meta.url)), JSON.stringify(out, null, 2) + '\n');
 console.log('wrote weekend_studio/service.json →', out.functionsUrl);

@@ -29,15 +29,18 @@ APP = "https://weekendindustries.app"
 
 class Rules(unittest.TestCase):
     def test_origins(self):
-        o = allowed_origins({}, env={})
+        o = allowed_origins({})
         self.assertEqual(o, set(DEFAULT_ORIGINS))
+        self.assertIn("https://weekendstudio.app", o, "the production site must be able to reach this server")
         self.assertTrue(origin_ok(APP, o))
         self.assertTrue(origin_ok(APP + "/", o))
         for bad in (None, "", "null", "https://evil.example", "http://weekendindustries.app", "https://weekendindustries.app.evil.example"):
             self.assertFalse(origin_ok(bad, o), bad)
-        dev = allowed_origins({}, env={"WEEKEND_STUDIO_LOCAL_ORIGINS": "http://localhost:5173, http://127.0.0.1:5173/"})
+        # A development copy lists its own sites in service.json; nothing comes from the environment (0.3.2).
+        dev = allowed_origins({"localOrigins": ["http://localhost:5173", "http://127.0.0.1:5173/"]})
         self.assertTrue(origin_ok("http://localhost:5173", dev) and origin_ok("http://127.0.0.1:5173", dev))
-        self.assertEqual(allowed_origins({"localOrigins": ["https://a.example"]}, env={}), {"https://a.example"})
+        self.assertFalse(origin_ok(APP, dev), "localOrigins replaces the defaults")
+        self.assertEqual(allowed_origins({"localOrigins": ["https://a.example"]}), {"https://a.example"})
 
     def test_hosts(self):
         self.assertTrue(host_ok("127.0.0.1:8189", 8189))
@@ -85,8 +88,8 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         store = WorkflowStore(os.path.join(self.tmp.name, "store"))
-        store.publish("Inpaint", fx("inpaint.api.json"))
-        self.version = store.describe(store.get("inpaint"), OBJECT_INFO)["version"]
+        self.wf = store.publish("Inpaint", fx("inpaint.api.json"))["id"]
+        self.version = store.describe(store.get(self.wf), OBJECT_INFO)["version"]
         os.makedirs(os.path.join(self.tmp.name, "input"))
         self.comfy = FakeComfy()
         self.server = LocalServer(store=store, runner=Runner(store, self.comfy, os.path.join(self.tmp.name, "input")),
@@ -109,7 +112,7 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(r.headers["Access-Control-Allow-Origin"], APP)
         body = await r.json()
-        self.assertEqual((body["app"], body["machineName"], [w["id"] for w in body["workflows"]]), ("weekend-studio", "Studio PC", ["inpaint"]))
+        self.assertEqual((body["app"], body["machineName"], [w["id"] for w in body["workflows"]]), ("weekend-studio", "Studio PC", [self.wf]))
         self.assertEqual(body["machineId"], "22222222-2222-4222-8222-222222222222", "a connected ComfyUI says which account machine it is")
 
     async def test_everyone_else_is_refused(self):
@@ -137,7 +140,7 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 415)
 
     async def test_a_streamed_run(self):
-        body = {"jobId": "j1", "workflowId": "inpaint", "version": self.version, "values": {"6.text": "a blue door"},
+        body = {"jobId": "j1", "workflowId": self.wf, "version": self.version, "values": {"6.text": "a blue door"},
                 "images": {"12.weekend_ref": base64.b64encode(PNG).decode(), "13.weekend_ref": base64.b64encode(PNG).decode()}}
         r = await self.client.post("/v1/run", data=json.dumps(body), headers={**self.h(), "Content-Type": "application/json"})
         self.assertEqual(r.status, 200)
@@ -148,7 +151,7 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.graph["6"]["inputs"]["text"], "a blue door")
 
     async def test_a_refused_run_says_why_in_the_stream(self):
-        body = {"jobId": "j2", "workflowId": "inpaint", "version": "0" * 20, "values": {}, "images": {}}
+        body = {"jobId": "j2", "workflowId": self.wf, "version": "0" * 20, "values": {}, "images": {}}
         r = await self.client.post("/v1/run", data=json.dumps(body), headers={**self.h(), "Content-Type": "application/json"})
         last = [json.loads(x) for x in (await r.text()).splitlines() if x.strip()][-1]
         self.assertEqual((last["type"], last["code"]), ("failed", "stale"))
