@@ -45,7 +45,7 @@ from .privacy import default_machine_name
 from .runner import RunError, Runner
 from .store import StoreError, WorkflowStore
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 log = logging.getLogger("weekend_studio")
 
