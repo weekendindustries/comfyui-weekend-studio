@@ -1,0 +1,45 @@
+{
+ "note": "The no-account code (comfy-node/weekend_studio/local_code.py), read the same by packages/comfy/localCode.js.",
+ "cases": [
+  {
+   "address": "192.168.1.126",
+   "port": 8189,
+   "secret": "123456789012345",
+   "code": "Y4HF-9YRP-66HJ",
+   "kind": 0,
+   "secretInCode": "264291242713"
+  },
+  {
+   "address": "10.0.0.7",
+   "port": 8190,
+   "secret": "9223372036854775813",
+   "code": "D4RR-5MHV-SFXM",
+   "kind": 1,
+   "secretInCode": "180860902"
+  },
+  {
+   "address": "172.20.3.4",
+   "port": 8193,
+   "secret": "42",
+   "code": "AAAA-ABV5-KHHV",
+   "kind": 2,
+   "secretInCode": "42"
+  },
+  {
+   "address": "100.64.1.2",
+   "port": 8196,
+   "secret": "987654321",
+   "code": "MPK2-RJGS-X4WG",
+   "kind": 3,
+   "secretInCode": "1922149"
+  },
+  {
+   "address": "127.0.0.1",
+   "port": 8189,
+   "secret": "7",
+   "code": "AAAB-EJWM-5QVM",
+   "kind": 3,
+   "secretInCode": "7"
+  }
+ ]
+}

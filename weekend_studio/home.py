@@ -27,6 +27,8 @@ machine token (they would keep replacing each other on the relay). Folders are 0
                   Two more keys, edited by hand when needed, never by the tab: `localPort` (where
                   same-computer mode starts looking, default 8189) and `allowedHosts` (names the tab's
                   routes also answer on: a reverse proxy, a LAN name; guard.py)
+  local.json      {secret, createdAt}: the no-account code's secret (local_code.py), made when the switch is
+                  first turned on; New code makes another, and every old code stops working
   workflows/      the published workflows (store.py)
 
 Pure standard library: the tests run it in plain `python -m unittest`.
@@ -138,6 +140,23 @@ class Home:
         new = secrets.token_hex(8)
         write_private_json(self.install_file, {"installId": new, "comfyPath": self.comfy_path, "createdAt": int(time.time())})
         return new
+
+    # The no-account code's secret (local_code.py): kept, so the code stays the same across restarts.
+    @property
+    def local_file(self) -> str:
+        return os.path.join(self.root, "local.json")
+
+    def local_secret(self, create: bool = True) -> int | None:
+        data = read_json(self.local_file)
+        if isinstance(data, dict) and isinstance(data.get("secret"), int) and not isinstance(data["secret"], bool):
+            return data["secret"]
+        return self.new_local_secret() if create else None
+
+    def new_local_secret(self) -> int:
+        from .local_code import new_secret
+        value = new_secret()
+        write_private_json(self.local_file, {"secret": value, "createdAt": int(time.time())})
+        return value
 
     # The switches. Both off until the user turns them on in the tab.
     def settings(self) -> dict:

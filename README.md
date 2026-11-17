@@ -12,8 +12,10 @@ Use your own ComfyUI workflows as generators in Weekend Studio.
    a picture from a prompt or from another picture shows in Images, Moods, Doc, Sketchbook and Animate;
    one that needs a mask or the whole canvas shows only in Images. Under **Show in**, untick an app to keep a workflow out of it.
 
-On the same computer you can skip the account: in the tab, turn on **Use from a browser on this
-computer, without an account**. It's off until you turn it on.
+You can skip the account on this computer or another one on the same network: in the tab, turn on
+**Use without an account, from this computer or your network**. It's off until you turn it on. The tab
+then shows a code (like `ABCD-EFGH-JKMN`); enter it in the **ComfyUI** panel of any Weekend Studio app,
+in Chrome or Edge. The browser talks straight to ComfyUI: nothing goes through Weekend Studio.
 
 These nodes connect a workflow to your document:
 
@@ -69,17 +71,22 @@ this computer's own name (unless you typed it as the name).
   after it last connected;
 - pictures of a run, until your browser has them (at most a day).
 
-**Same-computer mode** (off until you turn it on): a small server on `127.0.0.1:8189` (8189–8193)
-that answers only Weekend Studio's website, only from this computer: the Host must be
-`127.0.0.1`/`localhost`, the Origin must be `https://weekendstudio.app` (or its earlier address
-`https://weekendindustries.app`, or `https://studio.weekendindustries.dev`), and a run must be JSON, which makes the browser ask first.
+**No-account mode** (off until you turn it on; "same-computer mode" before 0.4.0): a small server on port
+8189 (8189–8193) that answers only Weekend Studio's website: the Origin must be `https://weekendstudio.app`
+(or its earlier address `https://weekendindustries.app`, or `https://studio.weekendindustries.dev`), and a
+run must be JSON, which makes the browser ask first. From this computer, the Host must be
+`127.0.0.1`/`localhost`. Since 0.4.0 it also listens on your network: a request from another computer
+must name this one by its address (never a name) and carry the tab's code in `X-Weekend-Studio-Code`.
+The code says where this ComfyUI is and holds a secret kept in `local.json`; **New code** makes another,
+and every old one stops working. A computer that sends 20 different wrong codes in ten minutes is
+refused for the next ten. If the network address can't be had, it listens on `127.0.0.1` only.
 It answers Chrome's local-network check (`Access-Control-Allow-Private-Network`) for those
 sites only. No picture, prompt or setting leaves the computer in this mode; pictures go straight between the
 browser and ComfyUI. If you're signed in, Weekend Studio records that a ComfyUI run was made for the
 document you're in, so that document's AI label stays true. Nothing else about the run is sent.
 
 **Stop:** **Disconnect** in the tab (this also removes the computer from your account), or remove
-it in Weekend Studio. Turn same-computer mode off in the tab. Uninstalling the node and deleting
+it in Weekend Studio. Turn no-account mode off in the tab. Uninstalling the node and deleting
 its folder removes everything it keeps.
 
 ## Where it keeps things
@@ -148,8 +155,11 @@ What a scan of this package finds, and why:
   they published. It opens only after the user clicks Connect, and closes on Disconnect. The relay
   can only name a workflow the user published here and send values for the settings they chose
   to show. It can never send a graph, a file path or code (`runner.py`, `description.py`).
-- **A second HTTP server** (`local_server.py`): off until the user turns on same-computer mode in
-  the tab, bound to `127.0.0.1` only, Origin- and Host-checked on every request.
+- **A second HTTP server** (`local_server.py`): off until the user turns on no-account mode in the
+  tab, Origin- and Host-checked on every request. Since 0.4.0 it listens on the network too; a request
+  from another computer needs the tab's code (`local_code.py`).
+- **A UDP socket that sends nothing** (`local_code.py` `lan_address`): "connected" to a private
+  address only to learn which of this computer's addresses the network sees, for the code.
 - **A key-shaped string** in `weekend_studio/service.json`: `publicAnonKey`, Supabase's public
   project key (`sb_publishable_…`), published in every page of the website. It grants nothing by
   itself.

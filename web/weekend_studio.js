@@ -395,12 +395,25 @@ function mountPanel(root) {
     if (st && st !== "error") {
       const on = !!status?.settings?.sameComputer;
       const check = el("input", { type: "checkbox", ...(on ? { checked: true } : {}), onChange: (e) => setSwitch("sameComputer", e.target.checked) });
+      // NO ACCOUNT (0.4.0; owner, 2026-11-16: "same network or same computer … this should not require server"): the
+      // browser comes straight here. On this computer it finds us by itself; another computer on the network types
+      // the code, which says where we are and proves the person read it here (local_code.py).
+      const local = status?.local || {};
       out.push(el("label", { class: "wks-switch" }, check, el("span", {},
-        "Use from a browser on this computer, without an account",
+        "Use without an account, from this computer or your network",
         el("br"),
         el("span", { class: "wks-dim" }, on
-          ? (status.local?.port ? `On: Weekend Studio's website can reach this ComfyUI at 127.0.0.1:${status.local.port}, from this computer only.` : "On, but it couldn't start: ports 8189–8193 are in use.")
-          : "Off. When on, Weekend Studio's website in Chrome or Edge on this computer can run your shown workflows here."))));
+          ? (!local.port ? "On, but it couldn't start: ports 8189–8193 are in use."
+            : local.network && local.address ? "On. In Weekend Studio's ComfyUI panel, enter this code (Chrome or Edge, on this computer or another one on your network):"
+            : "On, for this computer only: Weekend Studio's ComfyUI panel finds it by itself (Chrome or Edge).")
+          : "Off. When on, Weekend Studio's website in Chrome or Edge, on this computer or another one on your network, can run your shown workflows here. Nothing goes through Weekend Studio."))));
+      if (on && local.port && local.code && local.network && local.address) {
+        out.push(el("div", { class: "wks-code", "data-wks-local-code": "" }, local.code),
+          el("div", { class: "wks-row" },
+            el("button", { onClick: () => { navigator.clipboard?.writeText(local.code).then(() => flash("Copied.")).catch(() => {}); } }, "Copy"),
+            el("button", { onClick: () => setSwitch("newCode", true), title: "The old code stops working" }, "New code")),
+          el("p", { class: "wks-dim" }, "If your computer asks whether ComfyUI may accept connections, allow it on private networks. In the browser, choose Allow when it asks to reach devices on your network."));
+      }
     }
     return out;
   }

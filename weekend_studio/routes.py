@@ -7,7 +7,8 @@ alone let DNS rebinding, --enable-cors-header and --listen callers through (secu
 
   GET    /weekend-studio/status                 connection state (+ the pairing code while pairing),
                                                 the switches, this install's id
-  POST   /weekend-studio/settings               {sameComputer?, autoSync?} → the switches
+  POST   /weekend-studio/settings               {sameComputer?, autoSync?, newCode?} → the switches
+                                                (newCode: a new no-account code; the old one stops working)
   POST   /weekend-studio/connect                {name?} → {code, approveUrl, expiresIn}; open approveUrl
   POST   /weekend-studio/disconnect             forget this machine, here and on the account
   GET    /weekend-studio/workflows              published workflows + their descriptions
@@ -39,13 +40,14 @@ from .comfy_client import ComfyClient
 from .credentials import Credentials
 from .guard import allowed_names, check, comfy_listen
 from .home import Home, home_dir
+from . import local_code
 from .local_server import DEFAULT_PORT, PORT_TRIES, LocalServer
 from .description import description_problems, mark_refusals, output_problems
 from .privacy import default_machine_name
 from .runner import RunError, Runner
 from .store import StoreError, WorkflowStore
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 
 log = logging.getLogger("weekend_studio")
 
@@ -123,7 +125,8 @@ def install(server, home_root: str | None = None):
     # Same-computer mode (local_server.py): off until the switch in the tab is turned on.
     local = LocalServer(store=store, runner=runner, comfy=client, version=VERSION,
                         machine_name=lambda: (creds.load() or {}).get("name") or default_machine_name(), config=config,
-                        machine_id=lambda: (creds.load() or {}).get("machineId"))
+                        machine_id=lambda: (creds.load() or {}).get("machineId"),
+                        secret=lambda: home.local_secret(create=False))
     if home.settings()["sameComputer"]:
         background(local.start(home.local_port()), server.loop, "the same-computer server")
 
@@ -134,10 +137,20 @@ def install(server, home_root: str | None = None):
         return {"id": rec["id"], "name": rec["name"], "publishedAt": rec.get("published_at"),
                 "updatedAt": rec.get("updated_at"), "description": store.describe(rec, await client.object_info())}
 
+    def local_status(settings):
+        """The switch, where it listens, and the code for a browser on this computer or another one on the network."""
+        out = {"enabled": settings["sameComputer"], "port": local.port, "network": local.address == "0.0.0.0",
+               "address": None, "code": None}
+        if settings["sameComputer"] and local.port:
+            address = local_code.lan_address() if out["network"] else None
+            out["address"] = address
+            out["code"] = local_code.encode(address or "127.0.0.1", local.port, home.local_secret())
+        return out
+
     def status_body():
         settings = home.settings()
         return {"version": VERSION, "workflows": len(store.list()), **bridge.status(),
-                "local": {"enabled": settings["sameComputer"], "port": local.port},
+                "local": local_status(settings),
                 "settings": settings, "installId": home.install_id(), "defaultName": default_machine_name(),
                 "canConnect": can_relay}
 
@@ -155,6 +168,8 @@ def install(server, home_root: str | None = None):
             return fail(400, "bad-json", "not JSON")
         if not isinstance(body, dict):
             return fail(400, "bad-json", "not an object")
+        if body.get("newCode") is True:
+            home.new_local_secret()
         now = home.update_settings({k: body[k] for k in ("sameComputer", "autoSync") if isinstance(body.get(k), bool)})
         if now["sameComputer"] and local.port is None:
             if await local.start(home.local_port()) is None:

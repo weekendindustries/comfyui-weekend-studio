@@ -8,8 +8,9 @@ import os
 import tempfile
 import unittest
 
+from weekend_studio import local_code
 from weekend_studio.local_server import (
-    DEFAULT_ORIGINS, LocalServer, allowed_origins, cors_headers, host_ok, origin_ok, parse_run,
+    DEFAULT_ORIGINS, WRONG_LIMIT, LocalServer, allowed_origins, cors_headers, host_ok, ip_host_ok, is_loopback, origin_ok, parse_run,
 )
 from weekend_studio.runner import Runner
 from weekend_studio.store import WorkflowStore
@@ -47,6 +48,13 @@ class Rules(unittest.TestCase):
         self.assertTrue(host_ok("localhost:8189", 8189))
         for bad in (None, "", "127.0.0.1:8188", "evil.example:8189", "rebind.evil.example:8189", "127.0.0.1"):
             self.assertFalse(host_ok(bad, 8189), bad)
+
+    def test_another_computer_names_us_by_address(self):
+        self.assertTrue(ip_host_ok("192.168.1.20:8189", 8189))
+        for bad in (None, "", "192.168.1.20:8190", "comfy.local:8189", "rebind.evil.example:8189", "[::1]:8189", "192.168.1.20"):
+            self.assertFalse(ip_host_ok(bad, 8189), bad)
+        self.assertTrue(is_loopback("127.0.0.1") and is_loopback("::1"))
+        self.assertFalse(is_loopback("192.168.1.20") or is_loopback(None) or is_loopback("x"))
 
     def test_private_network_answer_only_when_asked(self):
         self.assertNotIn("Access-Control-Allow-Private-Network", cors_headers(APP))
@@ -94,7 +102,10 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         self.comfy = FakeComfy()
         self.server = LocalServer(store=store, runner=Runner(store, self.comfy, os.path.join(self.tmp.name, "input")),
                                   comfy=self.comfy, version="0.1.0", machine_name="Studio PC", config={},
-                                  machine_id=lambda: "22222222-2222-4222-8222-222222222222")
+                                  machine_id=lambda: "22222222-2222-4222-8222-222222222222",
+                                  secret=lambda: self.secret, clock=lambda: self.now)
+        self.secret = 4242424242
+        self.now = 1000.0
         self.client = TestClient(TestServer(self.server.app()))
         await self.client.start_server()
         self.server.port = self.client.port
@@ -132,6 +143,7 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 204)
         self.assertEqual(r.headers["Access-Control-Allow-Private-Network"], "true")
         self.assertIn("content-type", r.headers["Access-Control-Allow-Headers"])
+        self.assertIn("x-weekend-studio-code", r.headers["Access-Control-Allow-Headers"])
         r = await self.client.options("/v1/run", headers=self.h(origin="https://evil.example"))
         self.assertEqual(r.status, 403)
 
@@ -155,6 +167,69 @@ class OverHttp(unittest.IsolatedAsyncioTestCase):
         r = await self.client.post("/v1/run", data=json.dumps(body), headers={**self.h(), "Content-Type": "application/json"})
         last = [json.loads(x) for x in (await r.text()).splitlines() if x.strip()][-1]
         self.assertEqual((last["type"], last["code"]), ("failed", "stale"))
+
+
+    # ── From another computer on the network (0.4.0): only with the tab's code ─────────────────────
+    def lan(self, code=None, **extra):
+        h = self.h(host=f"192.168.1.20:{self.client.port}", **extra)
+        if code is not None:
+            h["X-Weekend-Studio-Code"] = code
+        return h
+
+    def code(self, secret=None):
+        # The tab's code names port 8189…8196; the test server's port is random, and the code's port only
+        # says where to look, so any port in range carries the secret just as well.
+        return local_code.encode("192.168.1.20", 8189, self.secret if secret is None else secret)
+
+    async def test_another_computer_with_the_code(self):
+        r = await self.client.get("/v1/hello", headers=self.lan(self.code()))
+        self.assertEqual(r.status, 200)
+        self.assertEqual((await r.json())["machineName"], "Studio PC")
+        body = {"jobId": "j3", "workflowId": self.wf, "version": self.version, "values": {"6.text": "a red door"},
+                "images": {"12.weekend_ref": base64.b64encode(PNG).decode(), "13.weekend_ref": base64.b64encode(PNG).decode()}}
+        r = await self.client.post("/v1/run", data=json.dumps(body), headers={**self.lan(self.code()), "Content-Type": "application/json"})
+        lines = [json.loads(x) for x in (await r.text()).splitlines() if x.strip()]
+        self.assertEqual(lines[-1]["type"], "done")
+
+    async def test_another_computer_without_it(self):
+        for code in (None, "", "ABCD-EFGH", self.code(secret=self.secret + 1)):
+            r = await self.client.get("/v1/hello", headers=self.lan(code))
+            self.assertEqual(r.status, 403, code)
+            self.assertEqual((await r.json())["error"], "bad-code")
+            self.assertEqual(r.headers["Access-Control-Allow-Origin"], APP, "our page can read why")
+        # …nor through a name, nor from another site even with the code.
+        r = await self.client.get("/v1/hello", headers={**self.lan(self.code()), "Host": f"comfy.local:{self.client.port}"})
+        self.assertEqual(r.status, 403)
+        r = await self.client.get("/v1/hello", headers=self.lan(self.code(), origin="https://evil.example"))
+        self.assertEqual(r.status, 403)
+        self.assertNotIn("Access-Control-Allow-Origin", r.headers)
+        # The preflight goes without it (a browser can't send one there); it runs nothing.
+        r = await self.client.options("/v1/run", headers=self.lan(**{"Access-Control-Request-Method": "POST",
+                                                                       "Access-Control-Request-Headers": "content-type,x-weekend-studio-code"}))
+        self.assertEqual(r.status, 204)
+
+    async def test_no_secret_no_entry(self):
+        self.secret = None
+        r = await self.client.get("/v1/hello", headers=self.lan(local_code.encode("192.168.1.20", 8189, 0)))
+        self.assertEqual(r.status, 403)
+
+    async def test_guessing_is_shut_out_but_an_old_tab_is_not(self):
+        # A tab still holding an old code asks every 15 s: the same wrong code counts once.
+        for _ in range(WRONG_LIMIT * 2):
+            r = await self.client.get("/v1/hello", headers=self.lan(self.code(secret=1)))
+            self.assertEqual(r.status, 403)
+        self.assertEqual((await self.client.get("/v1/hello", headers=self.lan(self.code()))).status, 200)
+        # Different wrong codes: after WRONG_LIMIT, even the right one waits ten minutes.
+        for i in range(WRONG_LIMIT):
+            await self.client.get("/v1/hello", headers=self.lan(self.code(secret=1000 + i)))
+        r = await self.client.get("/v1/hello", headers=self.lan(self.code()))
+        self.assertEqual(r.status, 429)
+        self.assertEqual((await r.json())["error"], "locked")
+        # This computer is never shut out…
+        self.assertEqual((await self.client.get("/v1/hello", headers=self.h())).status, 200)
+        # …and the other one is let back in after ten minutes.
+        self.now += 601
+        self.assertEqual((await self.client.get("/v1/hello", headers=self.lan(self.code()))).status, 200)
 
 
 if __name__ == "__main__":

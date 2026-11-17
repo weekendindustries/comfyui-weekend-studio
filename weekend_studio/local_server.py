@@ -1,4 +1,5 @@
-"""Same-computer mode: Weekend Studio in a browser on THIS computer talks straight to this ComfyUI.
+"""No-account mode: Weekend Studio in a browser on THIS computer, or on another computer on the same network,
+talks straight to this ComfyUI.
 
 No account, no relay, no pairing — the signed-out path (reviews/comfyui-plan-2026-10-14.md, round 6).
 ComfyUI's own server refuses cross-origin requests unless it's started with a flag, so the pack runs
@@ -23,6 +24,11 @@ Who may call it — every request, not just the browser's preflight:
     a POST without our Origin is refused before anything is read, and JSON bodies need a preflight.
   · Host must be 127.0.0.1/localhost at our port — a site that points its own name at 127.0.0.1
     (DNS rebinding) is refused.
+  · FROM ANOTHER COMPUTER on the network (0.4.0; owner, 2026-11-16: "same network or same computer … this should
+    not require server"): the server listens on every address, and a request that didn't come from this
+    computer to 127.0.0.1 must carry the tab's code (local_code.py) in X-Weekend-Studio-Code, and name us by
+    address (an IP literal), never by a name. Only the browser's preflight goes without it (it can't carry one).
+    A computer that sends 20 different wrong codes in ten minutes is refused for the next ten.
   · Chrome's local-network check (Access-Control-Request-Private-Network) is answered only for the
     allowed origins.
 The same rules as the relay path apply to what runs: the browser sends a workflow id and values,
@@ -32,9 +38,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import json
 import re
+import time
 
+from . import local_code
 from .privacy import scrub, scrub_all
 
 DEFAULT_PORT = 8189
@@ -64,11 +73,33 @@ def host_ok(host: str | None, port: int) -> bool:
     return host.lower() in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}")
 
 
+CODE_HEADER = "X-Weekend-Studio-Code"
+WRONG_LIMIT = 20                     # different wrong codes from one computer…
+WRONG_WINDOW_S = 600                 # …in ten minutes, and it's refused for ten
+
+
+def ip_host_ok(host: str | None, port: int) -> bool:
+    """An IPv4 address at our port (another computer reaching us by our address): never a name."""
+    if not host or not host.endswith(f":{port}"):
+        return False
+    try:
+        return ipaddress.ip_address(host[: -len(f":{port}")]).version == 4
+    except ValueError:
+        return False
+
+
+def is_loopback(remote: str | None) -> bool:
+    try:
+        return ipaddress.ip_address((remote or "").split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
 def cors_headers(origin: str, private_network: bool = False) -> dict:
     h = {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type",
+        "Access-Control-Allow-Headers": "content-type, x-weekend-studio-code",
         "Access-Control-Max-Age": "600",
         "Vary": "Origin",
     }
@@ -102,7 +133,7 @@ def parse_run(body) -> tuple[dict, dict]:
 
 class LocalServer:
     def __init__(self, *, store, runner, comfy, version: str, machine_name: str, config: dict | None = None,
-                 machine_id=lambda: None):
+                 machine_id=lambda: None, secret=lambda: None, clock=time.monotonic):
         self.store = store
         self.runner = runner
         self.comfy = comfy
@@ -110,8 +141,12 @@ class LocalServer:
         self.machine_name = machine_name
         self.machine_id = machine_id
         self.origins = allowed_origins(config)
+        self.secret = secret        # the code's secret (home.py); None: nobody from another computer gets in
+        self.clock = clock
         self.port = None
+        self.address = None         # 0.0.0.0 (the network too) or 127.0.0.1 (this computer only)
         self._runner = None
+        self._wrong = {}            # remote → {code: when}: different wrong codes, for the lockout
 
     def app(self):
         from aiohttp import web
@@ -120,6 +155,10 @@ class LocalServer:
         async def guard(request, handler):
             # Every request: our host, our origins. Refused before any body is read.
             ok, origin = self._guard_ok(request)
+            if ok in ("bad-code", "locked"):
+                # Our site, from another computer, without the right code: say so, readable by the page.
+                status = 429 if ok == "locked" else 403
+                return web.json_response({"error": ok}, status=status, headers=cors_headers(origin))
             if not ok:
                 return web.json_response({"error": "forbidden"}, status=403)
             resp = await handler(request)
@@ -136,21 +175,24 @@ class LocalServer:
         return app
 
     async def start(self, port: int | None = None) -> int | None:
-        """Bind 127.0.0.1 on the first free port from `port`; returns the port (None if none)."""
+        """Listen on the first free port from `port`, on every address (the network too) or, when that can't
+        be had, 127.0.0.1 only; returns the port (None if none)."""
         from aiohttp import web
         if self._runner is not None and self.port:
             return self.port   # already listening
         first = port or DEFAULT_PORT
         self._runner = web.AppRunner(self.app(), access_log=None)
         await self._runner.setup()
-        for p in range(first, first + PORT_TRIES):
-            try:
-                site = web.TCPSite(self._runner, "127.0.0.1", p)
-                await site.start()
-                self.port = p
-                return p
-            except OSError:
-                continue
+        for address in ("0.0.0.0", "127.0.0.1"):
+            for p in range(first, first + PORT_TRIES):
+                try:
+                    site = web.TCPSite(self._runner, address, p)
+                    await site.start()
+                    self.port = p
+                    self.address = address
+                    return p
+                except OSError:
+                    continue
         await self._runner.cleanup()
         self._runner = None
         return None
@@ -160,13 +202,36 @@ class LocalServer:
             await self._runner.cleanup()
             self._runner = None
         self.port = None
+        self.address = None
 
-    def _guard_ok(self, request) -> tuple[bool, str | None]:
+    def _guard_ok(self, request):
+        """→ (True | False | "bad-code" | "locked", origin)."""
         port = self.port or request.url.port
-        if not host_ok(request.headers.get("Host"), port):
-            return False, None
         origin = request.headers.get("Origin")
-        return origin_ok(origin, self.origins), origin
+        if not origin_ok(origin, self.origins):
+            return False, None
+        host = request.headers.get("Host")
+        if host_ok(host, port) and is_loopback(request.remote):
+            return True, origin                       # this computer, as before: no code
+        if not ip_host_ok(host, port):
+            return False, None                        # a name (DNS rebinding), or another port
+        if request.method == "OPTIONS":
+            return True, origin                       # the preflight can't carry the code; it runs nothing
+        return self._code_ok(request.remote or "?", request.headers.get(CODE_HEADER)), origin
+
+    def _code_ok(self, remote: str, code):
+        now = self.clock()
+        wrong = {c: t for c, t in self._wrong.get(remote, {}).items() if now - t < WRONG_WINDOW_S}
+        if len(wrong) >= WRONG_LIMIT:
+            self._wrong[remote] = wrong
+            return "locked"
+        secret = self.secret()
+        if secret is not None and local_code.matches(code, secret):
+            return True
+        # The same wrong code again (a tab with an old code, still looking) counts once.
+        wrong[str(code)[:32]] = now
+        self._wrong[remote] = wrong
+        return "locked" if len(wrong) >= WRONG_LIMIT else "bad-code"
 
     async def _preflight(self, request):
         from aiohttp import web

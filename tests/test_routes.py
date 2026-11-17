@@ -95,7 +95,7 @@ class Install(unittest.IsolatedAsyncioTestCase):
         body = await r.json()
         self.assertEqual(r.status, 200, body)
         self.assertEqual(body["settings"], {"sameComputer": False, "autoSync": False})
-        self.assertEqual(body["local"], {"enabled": False, "port": None})
+        self.assertEqual(body["local"], {"enabled": False, "port": None, "network": False, "address": None, "code": None})
         self.assertRegex(body["installId"], r"^[0-9a-f]{16}$")
         self.assertNotIn(socket.gethostname(), json.dumps(body), "the hostname isn't offered as the name")
 
@@ -123,10 +123,23 @@ class Install(unittest.IsolatedAsyncioTestCase):
         tab = {**TAB, "Host": f"127.0.0.1:{client.port}", "Content-Type": "application/json"}
         r = await client.post("/weekend-studio/settings", headers=tab, data=json.dumps({"sameComputer": True}))
         body = await r.json()
-        self.assertEqual((r.status, body["local"]), (200, {"enabled": True, "port": self.port}), body)
+        local = body["local"]
+        self.assertEqual((r.status, local["enabled"], local["port"]), (200, True, self.port), body)
+        self.assertTrue(local["network"], "on means this computer AND the network (0.4.0)")
         self.assertTrue(self.local_listening())
+        # The code says where we are and carries the secret kept in local.json; New code makes another.
+        from weekend_studio import local_code
+        from weekend_studio.home import Home
+        secret = Home(self.home_root).local_secret(create=False)
+        self.assertIsInstance(secret, int)
+        if local["code"]:   # only when the port is one a code can name (8189…8196) and there's a network
+            self.assertEqual(local_code.decode(local["code"])["address"], local["address"])
+            self.assertTrue(local_code.matches(local["code"], secret))
+        r = await client.post("/weekend-studio/settings", headers=tab, data=json.dumps({"newCode": True}))
+        self.assertEqual(r.status, 200)
+        self.assertNotEqual(Home(self.home_root).local_secret(create=False), secret, "New code: the old one stops working")
         r = await client.post("/weekend-studio/settings", headers=tab, data=json.dumps({"sameComputer": False}))
-        self.assertEqual((await r.json())["local"], {"enabled": False, "port": None})
+        self.assertEqual((await r.json())["local"], {"enabled": False, "port": None, "network": False, "address": None, "code": None})
         self.assertFalse(self.local_listening(), "off means the port is closed")
 
     async def test_switched_on_before_starts_with_comfyui(self):
